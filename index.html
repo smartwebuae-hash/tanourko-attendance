@@ -6,21 +6,21 @@
 <title>تبصيم موظفين تنوركو</title>
 <style>
   :root{
-    --bg:#151a1f; --surface:#1e252c; --surface-2:#262e37; --line:#3a4552;
-    --text:#f0f3f6; --muted:#8a96a3; --accent:#2f7fe0; --good:#2fae5c; --danger:#e05555;
+    --bg:#fff6ee; --surface:#ffffff; --surface-2:#fff1e4; --line:#f2d2b6;
+    --text:#2b1a10; --muted:#8a6a55; --accent:#e8711a; --accent-dark:#c95a0c; --good:#2e9e52; --danger:#d64545;
     --radius:14px;
   }
   *{box-sizing:border-box;}
-  body{margin:0;background:var(--bg);color:var(--text);font-family:'Segoe UI',Tahoma,Arial,sans-serif;min-height:100vh;-webkit-tap-highlight-color:transparent;}
+  body{margin:0;background:linear-gradient(180deg,var(--accent) 0,var(--accent) 75px,var(--bg) 75px);color:var(--text);font-family:'Segoe UI',Tahoma,Arial,sans-serif;min-height:100vh;-webkit-tap-highlight-color:transparent;}
   #app{max-width:560px;margin:0 auto;padding:20px 16px 60px;min-height:100vh;}
   .brand{text-align:center;margin-bottom:18px;}
-  .brand-logo{width:100px;height:100px;border-radius:50%;object-fit:cover;background:#fff;border:3px solid var(--line);display:block;margin:0 auto 10px;}
-  h1{font-size:22px;text-align:center;margin:0 0 4px;font-weight:900;}
+  .brand-logo{width:100px;height:100px;border-radius:50%;object-fit:cover;background:#fff;border:4px solid #fff;box-shadow:0 4px 14px rgba(160,70,10,.3);display:block;margin:0 auto 10px;}
+  h1{font-size:22px;text-align:center;margin:0 0 4px;font-weight:900;color:var(--accent-dark);}
   .sub{text-align:center;color:var(--muted);font-size:13px;margin:0;}
-  .card{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:16px;margin-bottom:14px;}
+  .card{background:var(--surface);box-shadow:0 2px 10px rgba(200,100,30,.08);border:1px solid var(--line);border-radius:var(--radius);padding:16px;margin-bottom:14px;}
   .clock-now{text-align:center;font-size:15px;color:var(--accent);font-weight:800;margin-bottom:16px;}
   input[type="text"], input[type="password"], input[type="number"]{
-    width:100%;background:var(--surface-2);border:1px solid var(--line);color:#fff;-webkit-text-fill-color:#fff;
+    width:100%;background:var(--surface-2);border:1px solid var(--line);color:var(--text);-webkit-text-fill-color:var(--text);
     padding:12px;border-radius:10px;font-size:15px;margin-bottom:12px;font-family:inherit;
   }
   input::placeholder{color:var(--muted);-webkit-text-fill-color:var(--muted);}
@@ -37,16 +37,16 @@
   .status-in{color:var(--good);font-weight:800;}
   .status-out{color:var(--muted);}
   .status-none{color:var(--muted);}
-  .back-link{color:var(--accent);font-size:13px;background:none;border:none;padding:6px 0;margin-bottom:10px;text-decoration:underline;cursor:pointer;}
+  .back-link{color:var(--accent-dark);font-size:13px;background:none;border:none;padding:6px 0;margin-bottom:10px;text-decoration:underline;cursor:pointer;}
   .msg{font-size:13px;padding:10px 12px;border-radius:10px;margin-bottom:14px;text-align:center;font-weight:700;line-height:1.6;}
-  .msg-error{background:rgba(224,85,85,0.15);color:#f2a0a0;border:1px solid rgba(224,85,85,0.35);}
-  .msg-success{background:rgba(47,174,92,0.15);color:#8fe0ab;border:1px solid rgba(47,174,92,0.35);}
-  .msg-info{background:rgba(47,127,224,0.15);color:#a9cbf5;border:1px solid rgba(47,127,224,0.35);}
+  .msg-error{background:#fdecec;color:#b02a2a;border:1px solid #f3bcbc;}
+  .msg-success{background:#e9f7ee;color:#1f7a3d;border:1px solid #b6e3c5;}
+  .msg-info{background:#fff1e4;color:var(--accent-dark);border:1px solid var(--line);}
   .center-screen{display:flex;flex-direction:column;justify-content:center;min-height:70vh;}
   table{width:100%;border-collapse:collapse;font-size:12.5px;}
-  thead th{background:#0e1216;color:#fff;padding:7px 5px;border:1px solid var(--line);text-align:center;white-space:nowrap;}
+  thead th{background:var(--accent);color:#fff;padding:7px 5px;border:1px solid var(--line);text-align:center;white-space:nowrap;}
   tbody td{padding:6px 5px;border:1px solid var(--line);text-align:center;color:var(--text);}
-  tbody tr:nth-child(even){background:rgba(255,255,255,0.03);}
+  tbody tr:nth-child(even){background:var(--surface-2);}
   .table-wrap{overflow-x:auto;border-radius:10px;border:1px solid var(--line);margin-bottom:14px;}
   .tabs{display:flex;gap:6px;margin-bottom:14px;}
   .tab{flex:1;text-align:center;padding:10px 4px;border-radius:10px;background:var(--surface-2);border:1px solid var(--line);color:var(--muted);font-size:13px;cursor:pointer;}
@@ -59,7 +59,7 @@
   .logout{color:var(--muted);font-size:13px;background:none;border:none;text-decoration:underline;cursor:pointer;padding:6px;}
   .actions-bar{display:flex;gap:8px;flex-wrap:wrap;}
   .actions-bar button{flex:1;min-width:120px;padding:11px;font-size:13px;}
-  @media print{ .no-print{display:none !important;} body{background:#fff;color:#000;} .card,.table-wrap{border-color:#000;} thead th{background:#000;} }
+  @media print{ .no-print{display:none !important;} body{background:#fff;color:#000;} .card,.table-wrap{border-color:#000;} thead th{background:#e8711a;color:#fff;-webkit-print-color-adjust:exact;print-color-adjust:exact;} }
 </style>
 </head>
 <body>
@@ -677,7 +677,7 @@ function App(){
       content.innerHTML = `
         <div class="card">
           <label style="display:block;margin-bottom:6px;color:var(--muted);font-size:13px;">إرسال تنبيه لموظف</label>
-          <select id="notif-emp-select" style="width:100%;background:var(--surface-2);border:1px solid var(--line);color:#fff;padding:12px;border-radius:10px;font-size:15px;margin-bottom:12px;font-family:inherit;">
+          <select id="notif-emp-select" style="width:100%;background:var(--surface-2);border:1px solid var(--line);color:var(--text);padding:12px;border-radius:10px;font-size:15px;margin-bottom:12px;font-family:inherit;">
             <option value="">اختر الموظف</option>
             ${empOptions}
           </select>
