@@ -22,7 +22,7 @@
   .sub{text-align:center;color:var(--muted);font-size:13px;margin:0;}
   .card{background:var(--surface);box-shadow:0 2px 10px rgba(200,100,30,.08);border:1px solid var(--line);border-radius:var(--radius);padding:16px;margin-bottom:14px;}
   .clock-now{text-align:center;font-size:15px;color:var(--accent);font-weight:800;margin-bottom:16px;}
-  input[type="text"], input[type="password"], input[type="number"]{
+  input[type="text"], input[type="password"], input[type="number"], input[type="time"]{
     width:100%;background:var(--surface-2);border:1px solid var(--line);color:var(--text);-webkit-text-fill-color:var(--text);
     padding:12px;border-radius:10px;font-size:15px;margin-bottom:12px;font-family:inherit;
   }
@@ -168,8 +168,46 @@ function hoursBetween(timeIn, timeOut){
 function defaultEmployees(){ return []; }
 function normalizeEmployee(e){
   if(typeof e === 'string') return { name: e, pin: '' };
-  return { name: e.name, pin: e.pin || '' };
+  return { name: e.name, pin: e.pin || '', shiftStart: e.shiftStart || '', shiftEnd: e.shiftEnd || '' };
 }
+// ===== حساب التأخير والخروج المبكر =====
+function toMins(t){ if(!t || !/^\d{1,2}:\d{2}$/.test(t)) return null; const [h,m]=t.split(':').map(Number); return h*60+m; }
+function wrapDiff(d){ while(d > 720) d -= 1440; while(d < -720) d += 1440; return d; }
+function fmtMins(m){
+  if(m < 60) return m + ' دقيقة';
+  const h = Math.floor(m/60), r = m % 60;
+  return h + ' ساعة' + (r ? ' و ' + r + ' دقيقة' : '');
+}
+function shiftOf(rec){
+  const emp = findEmployee(rec.employee);
+  return {
+    start: rec.shiftStart || (emp && emp.shiftStart) || '',
+    end: rec.shiftEnd || (emp && emp.shiftEnd) || ''
+  };
+}
+function lateMins(rec){
+  const sh = shiftOf(rec); const a = toMins(rec.timeIn), b = toMins(sh.start);
+  if(a===null || b===null) return 0;
+  return Math.max(0, wrapDiff(a - b));
+}
+function earlyMins(rec){
+  const sh = shiftOf(rec); const a = toMins(rec.timeOut), b = toMins(sh.end);
+  if(a===null || b===null) return 0;
+  return Math.max(0, wrapDiff(b - a));
+}
+function notesHtml(rec){
+  const parts = [];
+  const l = lateMins(rec), e = earlyMins(rec);
+  if(l > 0) parts.push(`<div style="color:var(--danger);font-weight:700;">دخول بعد الوقت ${fmtMins(l)}</div>`);
+  if(e > 0) parts.push(`<div style="color:var(--danger);font-weight:700;">خروج قبل الوقت ${fmtMins(e)}</div>`);
+  if(!parts.length){
+    const sh = shiftOf(rec);
+    if(sh.start && rec.timeIn) return `<span style="color:var(--good);">✔ منضبط</span>`;
+    return '-';
+  }
+  return parts.join('');
+}
+function shiftLabel(emp){ return (emp.shiftStart && emp.shiftEnd) ? `${emp.shiftStart} ← ${emp.shiftEnd}` : 'بدون دوام محدد'; }
 function findEmployee(name){ return state.employees.find(e=>e.name===name) || null; }
 
 // ===== رأس الصفحة: الشعار + الاسم =====
@@ -323,14 +361,16 @@ async function clockIn(empName){
   const ok = await mutateRecords(records=>{
     const today = todayISO();
     if(records.some(r=>r.employee===empName && r.date===today)) return false; // مسجل مسبقًا
-    rec = { id: uid(), employee: empName, date: today, timeIn: nowTimeStr(), timeOut: null, inLoc: check.where };
+    const emp = findEmployee(empName) || {};
+    rec = { id: uid(), employee: empName, date: today, timeIn: nowTimeStr(), timeOut: null, inLoc: check.where, shiftStart: emp.shiftStart || '', shiftEnd: emp.shiftEnd || '' };
     records.push(rec);
   });
   state.busy = false;
   if(ok){
     state.selectedEmployee = null;
     state.clockPin = '';
-    flash('success', `تم تسجيل دخول ${empName} الساعة ${rec.timeIn}`, 2500);
+    const lm = lateMins(rec);
+    flash(lm>0?'error':'success', `تم تسجيل دخول ${empName} الساعة ${rec.timeIn}` + (lm>0 ? `<br>⚠️ دخول بعد الوقت ${fmtMins(lm)}` : ''), lm>0?5000:2500);
   } else if(!rec){
     flash('error', 'هذا الموظف مسجل دخول اليوم مسبقًا.', 3000);
   } else {
@@ -345,19 +385,21 @@ async function clockOut(empName){
   flash('info', '📍 جارِ التحقق من موقعك...');
   const check = await checkInsideRestaurant();
   if(!check.ok){ state.busy = false; flash('error', check.text, 6000); return; }
-  let timeOut = null;
+  let timeOut = null, outRec = null;
   const ok = await mutateRecords(records=>{
     const today = todayISO();
     const rec = records.find(r=>r.employee===empName && r.date===today);
     if(!rec || rec.timeOut) return false;
     rec.timeOut = timeOut = nowTimeStr();
     rec.outLoc = check.where;
+    outRec = rec;
   });
   state.busy = false;
   if(ok){
     state.selectedEmployee = null;
     state.clockPin = '';
-    flash('success', `تم تسجيل خروج ${empName} الساعة ${timeOut}`, 2500);
+    const em = outRec ? earlyMins(outRec) : 0;
+    flash(em>0?'error':'success', `تم تسجيل خروج ${empName} الساعة ${timeOut}` + (em>0 ? `<br>⚠️ خروج قبل الوقت ${fmtMins(em)}` : ''), em>0?5000:2500);
   } else if(!timeOut){
     flash('error', 'لا يوجد دخول مفتوح لهذا الموظف اليوم.', 3000);
   } else {
@@ -368,10 +410,12 @@ async function clockOut(empName){
 async function addEmployee(){
   const name = state.newEmployeeName.trim();
   const pin = state.newEmployeePin.trim();
+  const shiftStart = (document.getElementById('new-emp-start')||{}).value || '';
+  const shiftEnd = (document.getElementById('new-emp-end')||{}).value || '';
   if(!name) return;
   if(!pin){ alert('اكتب رقم/PIN خاص بالموظف.'); return; }
   if(state.employees.some(e=>e.name===name)){ alert('هذا الموظف مضاف أصلاً.'); return; }
-  state.employees.push({ name, pin });
+  state.employees.push({ name, pin, shiftStart, shiftEnd });
   const ok = await settingsSet(EMPLOYEES_KEY, state.employees);
   if(!ok){ state.employees.pop(); alert('⚠️ لم يتم الحفظ! تأكد من الإنترنت.'); render(); return; }
   state.newEmployeeName = '';
@@ -479,6 +523,26 @@ async function changeAdminPassword(){
   if(!ok){ alert('⚠️ لم يتم الحفظ! تأكد من الإنترنت.'); return; }
   storedAdminPass = newP;
   alert('تم تغيير كلمة مرور الإدارة ✅ احفظها في مكان آمن.');
+  render();
+}
+async function changeEmployeeShift(name){
+  const emp = findEmployee(name);
+  if(!emp) return;
+  const st = prompt(`وقت دخول "${name}" بنظام 24 ساعة (مثال 12:00) — اتركه فاضي لإلغاء الدوام:`, emp.shiftStart || '12:00');
+  if(st === null) return;
+  let en = '';
+  if(st.trim()){
+    if(toMins(st.trim())===null){ alert('اكتب الوقت بهذا الشكل: 12:00'); return; }
+    en = prompt(`وقت خروج "${name}" بنظام 24 ساعة (مثال 21:00 يعني 9 مساءً):`, emp.shiftEnd || '21:00');
+    if(en === null) return;
+    if(toMins(en.trim())===null){ alert('اكتب الوقت بهذا الشكل: 21:00'); return; }
+  }
+  const old = { s: emp.shiftStart, e: emp.shiftEnd };
+  emp.shiftStart = st.trim() ? pad(Math.floor(toMins(st.trim())/60)) + ':' + pad(toMins(st.trim())%60) : '';
+  emp.shiftEnd = en.trim() ? pad(Math.floor(toMins(en.trim())/60)) + ':' + pad(toMins(en.trim())%60) : '';
+  const ok = await settingsSet(EMPLOYEES_KEY, state.employees);
+  if(!ok){ emp.shiftStart = old.s; emp.shiftEnd = old.e; alert('⚠️ لم يتم الحفظ! تأكد من الإنترنت.'); return; }
+  alert(`تم حفظ دوام ${name}: ${shiftLabel(emp)} ✅\n(ينطبق على التبصيمات الجديدة)`);
   render();
 }
 async function changeEmployeePin(name){
@@ -634,7 +698,10 @@ function App(){
     const totalsByEmployee = {};
     monthRecs.forEach(r=>{
       const h = hoursBetween(r.timeIn, r.timeOut);
-      if(!totalsByEmployee[r.employee]) totalsByEmployee[r.employee] = { days:0, hours:0 };
+      if(!totalsByEmployee[r.employee]) totalsByEmployee[r.employee] = { days:0, hours:0, late:0, early:0, lateDays:0, earlyDays:0 };
+      const _l = lateMins(r), _e = earlyMins(r);
+      totalsByEmployee[r.employee].late += _l; if(_l>0) totalsByEmployee[r.employee].lateDays++;
+      totalsByEmployee[r.employee].early += _e; if(_e>0) totalsByEmployee[r.employee].earlyDays++;
       totalsByEmployee[r.employee].days += 1;
       if(h) totalsByEmployee[r.employee].hours += parseFloat(h);
     });
@@ -658,7 +725,7 @@ function App(){
     const content = document.getElementById('admin-content');
     if(state.adminTab === 'report'){
       const rowsHtml = monthRecs.length === 0
-        ? `<tr><td colspan="6" style="padding:16px;color:var(--muted);">لا توجد سجلات بهذا الشهر</td></tr>`
+        ? `<tr><td colspan="7" style="padding:16px;color:var(--muted);">لا توجد سجلات بهذا الشهر</td></tr>`
         : monthRecs.map(r=>`
             <tr>
               <td>${isoToDisplay(r.date)}</td>
@@ -666,6 +733,7 @@ function App(){
               <td style="cursor:pointer;text-decoration:underline;" data-edit="${r.id}|timeIn">${r.timeIn||'-'}${r.inLoc ? `<div style="font-size:10px;color:var(--muted);text-decoration:none;">📍${r.inLoc.dist}م</div>` : ''}</td>
               <td style="cursor:pointer;text-decoration:underline;" data-edit="${r.id}|timeOut">${r.timeOut||'-'}${r.outLoc ? `<div style="font-size:10px;color:var(--muted);text-decoration:none;">📍${r.outLoc.dist}م</div>` : ''}</td>
               <td>${hoursBetween(r.timeIn,r.timeOut) || '-'}</td>
+              <td style="font-size:11px;">${notesHtml(r)}</td>
               <td class="no-print"><button data-del-rec="${r.id}" style="background:none;border:none;color:var(--danger);cursor:pointer;">🗑️</button></td>
             </tr>
           `).join('');
@@ -673,7 +741,11 @@ function App(){
         <div class="card">
           <b style="font-size:14px;">إجمالي الشهر لكل موظف</b>
           ${Object.entries(totalsByEmployee).map(([name,t])=>`
-            <div class="item-row"><span>${name}</span><span>${t.days} يوم — ${t.hours.toFixed(1)} ساعة</span></div>
+            <div class="item-row" style="display:block;">
+              <div style="display:flex;justify-content:space-between;"><b>${name}</b><span>${t.days} يوم — ${t.hours.toFixed(1)} ساعة</span></div>
+              ${t.late>0 ? `<div style="color:var(--danger);font-size:12px;margin-top:3px;">تأخير: ${fmtMins(t.late)} (${t.lateDays} يوم)</div>` : ''}
+              ${t.early>0 ? `<div style="color:var(--danger);font-size:12px;margin-top:3px;">خروج مبكر: ${fmtMins(t.early)} (${t.earlyDays} يوم)</div>` : ''}
+            </div>
           `).join('')}
         </div>
       `;
@@ -691,7 +763,7 @@ function App(){
           </div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>التاريخ</th><th>الموظف</th><th>الدخول</th><th>الخروج</th><th>الساعات</th><th class="no-print"></th></tr></thead>
+              <thead><tr><th>التاريخ</th><th>الموظف</th><th>الدخول</th><th>الخروج</th><th>الساعات</th><th>ملاحظات</th><th class="no-print"></th></tr></thead>
               <tbody>${rowsHtml}</tbody>
             </table>
           </div>
@@ -722,6 +794,10 @@ function App(){
           <label style="display:block;margin-bottom:6px;color:var(--muted);font-size:13px;">إضافة موظف جديد</label>
           <input type="text" id="new-emp-input" placeholder="اسم الموظف" value="${state.newEmployeeName.replace(/"/g,'&quot;')}">
           <input type="text" id="new-emp-pin-input" placeholder="رقم الموظف الخاص (PIN)" value="${state.newEmployeePin.replace(/"/g,'&quot;')}">
+          <div style="display:flex;gap:8px;">
+            <label style="flex:1;font-size:12px;color:var(--muted);">وقت الدخول<input type="time" id="new-emp-start" value="12:00" class="time-in"></label>
+            <label style="flex:1;font-size:12px;color:var(--muted);">وقت الخروج<input type="time" id="new-emp-end" value="21:00" class="time-in"></label>
+          </div>
           <button class="big btn-primary" id="add-emp-btn">إضافة</button>
         </div>
         <div class="card">
@@ -739,7 +815,7 @@ function App(){
         state.employees.forEach(emp=>{
           const row = document.createElement('div');
           row.className = 'item-row';
-          row.innerHTML = `<span>${emp.name} <span style="color:var(--muted);font-size:12px;">(رقم: ${emp.pin||'-'})</span></span>`;
+          row.innerHTML = `<span>${emp.name} <span style="color:var(--muted);font-size:12px;">(رقم: ${emp.pin||'-'})</span><br><span style="color:var(--accent-dark);font-size:12px;">⏰ ${shiftLabel(emp)}</span></span>`;
           const delBtn = document.createElement('button');
           delBtn.className = 'btn-ghost';
           delBtn.style.color = 'var(--danger)';
@@ -756,6 +832,15 @@ function App(){
           pinBtn.onclick = ()=> changeEmployeePin(emp.name);
           const btns = document.createElement('div');
           btns.style.display = 'flex';
+          const shBtn = document.createElement('button');
+          shBtn.className = 'btn-ghost';
+          shBtn.style.padding = '6px 12px';
+          shBtn.style.fontSize = '12px';
+          shBtn.style.marginInlineEnd = '6px';
+          shBtn.textContent = '⏰ الدوام';
+          shBtn.onclick = ()=> changeEmployeeShift(emp.name);
+          btns.style.flexWrap = 'wrap'; btns.style.gap = '6px'; btns.style.justifyContent = 'flex-end';
+          btns.appendChild(shBtn);
           btns.appendChild(pinBtn);
           btns.appendChild(delBtn);
           row.appendChild(btns);
@@ -917,9 +1002,9 @@ function App(){
     myRecs.forEach(r=>{ const h = hoursBetween(r.timeIn, r.timeOut); if(h) totalHours += parseFloat(h); });
     const myNotifs = state.notifications.filter(n=>n.employee===name);
     const rowsHtml = myRecs.length === 0
-      ? `<tr><td colspan="4" style="padding:14px;color:var(--muted);">لا توجد سجلات بهذا الشهر</td></tr>`
+      ? `<tr><td colspan="5" style="padding:14px;color:var(--muted);">لا توجد سجلات بهذا الشهر</td></tr>`
       : myRecs.map(r=>`
-          <tr><td>${isoToDisplay(r.date)}</td><td>${r.timeIn||'-'}</td><td>${r.timeOut||'-'}</td><td>${hoursBetween(r.timeIn,r.timeOut)||'-'}</td></tr>
+          <tr><td>${isoToDisplay(r.date)}</td><td>${r.timeIn||'-'}</td><td>${r.timeOut||'-'}</td><td>${hoursBetween(r.timeIn,r.timeOut)||'-'}</td><td style="font-size:11px;">${notesHtml(r)}</td></tr>
         `).join('');
     app.innerHTML = `
       ${header('مرحبًا ' + name)}
@@ -933,6 +1018,8 @@ function App(){
         <div style="font-size:14px;color:var(--muted);">إجمالي ساعات هذا الشهر</div>
         <div style="font-size:26px;font-weight:900;color:var(--accent);">${totalHours.toFixed(1)} ساعة</div>
         <div class="totals-line">${myRecs.length} يوم حضور</div>
+        ${(()=>{ const L=myRecs.reduce((a,r)=>a+lateMins(r),0), E=myRecs.reduce((a,r)=>a+earlyMins(r),0);
+          return (L?`<div style="color:var(--danger);font-size:13px;margin-top:6px;">إجمالي التأخير: ${fmtMins(L)}</div>`:'') + (E?`<div style="color:var(--danger);font-size:13px;margin-top:3px;">إجمالي الخروج المبكر: ${fmtMins(E)}</div>`:''); })()}
       </div>
       ${myNotifs.length > 0 ? `
         <div class="card" style="border-color:var(--danger);">
@@ -944,7 +1031,7 @@ function App(){
         <b style="font-size:14px;">تفاصيل الأيام</b>
         <div class="table-wrap" style="margin-top:10px;">
           <table>
-            <thead><tr><th>التاريخ</th><th>الدخول</th><th>الخروج</th><th>الساعات</th></tr></thead>
+            <thead><tr><th>التاريخ</th><th>الدخول</th><th>الخروج</th><th>الساعات</th><th>ملاحظات</th></tr></thead>
             <tbody>${rowsHtml}</tbody>
           </table>
         </div>
@@ -970,6 +1057,7 @@ function App(){
       <div class="card" style="text-align:center;">
         <div style="font-size:19px;font-weight:900;margin-bottom:6px;">${name}</div>
         <div class="clock-now">🕒 الوقت الآن: ${nowTimeStr()}</div>
+        ${(()=>{ const e = findEmployee(name); return (e && e.shiftStart) ? `<div style="color:var(--muted);font-size:13px;margin:-8px 0 14px;">⏰ دوامك: ${shiftLabel(e)}</div>` : ''; })()}
         ${done ? `<p style="color:var(--muted);font-size:14px;">تم تسجيل الدخول والخروج لهذا اليوم<br>(${rec.timeIn} → ${rec.timeOut})</p>` : ''}
         ${(canClockIn || canClockOut) ? `<input type="password" id="clock-pin-input" inputmode="numeric" autocomplete="off" placeholder="اكتب رقمك السري" value="${state.clockPin.replace(/"/g,'&quot;')}" style="text-align:center;font-size:18px;letter-spacing:4px;">` : ''}
         ${canClockIn ? `<button class="big btn-good" id="clockin-btn" style="margin-bottom:10px;" ${state.busy?'disabled':''}>🟢 تسجيل دخول</button>` : ''}
