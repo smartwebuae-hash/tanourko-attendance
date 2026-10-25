@@ -108,18 +108,8 @@ const NOTIFICATIONS_KEY = 'attendance_notifications';
 const LOCATION_KEY = 'attendance_location'; // جديد: موقع المطعم المسموح التبصيم منه
 const DEFAULT_PASS = 'Tanourko2026';
 const DEFAULT_RADIUS = 100; // متر
-const DEVICES_KEY = 'attendance_devices'; // جديد: الأجهزة المعتمدة للتبصيم
 const MAX_ACCURACY = 100; // نرفض قراءة GPS إذا كانت دقتها أسوأ من 100 متر
 
-// رقم ثابت لكل جهاز (يُحفظ في المتصفح) — نستخدمه لاعتماد أجهزة معينة فقط
-function getDeviceId(){
-  try{
-    let id = localStorage.getItem('tanourko_device_id');
-    if(!id){ id = 'dev-' + Date.now().toString(36) + Math.random().toString(36).slice(2,8); localStorage.setItem('tanourko_device_id', id); }
-    return id;
-  }catch(e){ return 'no-storage'; }
-}
-const DEVICE_ID = getDeviceId();
 const RESTAURANT_WHATSAPP = '971500888917';
 
 async function settingsGet(key){
@@ -228,7 +218,7 @@ let state = {
   newEmployeeName:'', newEmployeePin:'', currentMonth: monthKey(todayISO()),
   empLoginName:'', empLoginPin:'', empLoginError:null, loggedEmployee:null,
   notifTargetEmployee:'', notifMessage:'',
-  restaurantLoc:null, clockPin:'', deviceCfg:{ enabled:false, devices:[] }
+  restaurantLoc:null, mapOpen:false, clockPin:''
 };
 let storedAdminPass = DEFAULT_PASS;
 
@@ -250,8 +240,6 @@ async function init(){
   storedAdminPass = pass;
 
   state.restaurantLoc = await settingsGet(LOCATION_KEY);
-  const dc = await settingsGet(DEVICES_KEY);
-  if(dc && Array.isArray(dc.devices)) state.deviceCfg = { enabled: !!dc.enabled, devices: dc.devices };
 
   state.loading = false;
   render();
@@ -293,19 +281,10 @@ function geoErrorText(err){
   if(err && err.code === -1) return 'هذا الجهاز لا يدعم تحديد الموقع.';
   return 'تعذّر تحديد موقعك. شغّل الـ GPS وحاول مرة ثانية.';
 }
-function isDeviceAllowed(){
-  if(!state.deviceCfg.enabled) return true;
-  return state.deviceCfg.devices.some(d=>d.id===DEVICE_ID);
-}
 async function checkInsideRestaurant(){
-  // تحديث إعدادات الأجهزة والموقع من السيرفر قبل كل تبصيمة
-  const dc = await settingsGet(DEVICES_KEY);
-  if(dc && Array.isArray(dc.devices)) state.deviceCfg = { enabled: !!dc.enabled, devices: dc.devices };
+  // تحديث موقع المطعم من السيرفر قبل كل تبصيمة
   const freshLoc = await settingsGet(LOCATION_KEY);
   if(freshLoc) state.restaurantLoc = freshLoc;
-  if(!isDeviceAllowed()){
-    return { ok:false, text:'🚫 هذا الجهاز غير معتمد للتبصيم. التبصيم مسموح فقط من أجهزة المطعم المعتمدة من الإدارة.' };
-  }
   const loc = state.restaurantLoc;
   if(!loc || typeof loc.lat !== 'number'){
     return { ok:false, text:'لم تحدد الإدارة موقع المطعم بعد. التبصيم متوقف حتى يتم تحديده.' };
@@ -322,7 +301,7 @@ async function checkInsideRestaurant(){
   if(dist > radius){
     return { ok:false, text:`❌ أنت خارج المطعم (تبعد حوالي ${dist} متر). التبصيم مسموح من داخل المطعم فقط.` };
   }
-  return { ok:true, where:{ lat:+latitude.toFixed(6), lng:+longitude.toFixed(6), dist, acc:Math.round(accuracy), device: DEVICE_ID } };
+  return { ok:true, where:{ lat:+latitude.toFixed(6), lng:+longitude.toFixed(6), dist, acc:Math.round(accuracy) } };
 }
 
 function todaysRecordFor(empName){
@@ -500,6 +479,76 @@ async function setRestaurantLocationHere(){
   alert(`تم حفظ موقع المطعم ✅ (دقة GPS حوالي ${Math.round(pos.coords.accuracy)} متر)`);
   render();
 }
+// ===== اختيار الموقع من الخريطة =====
+let pickMap = null, pickMarker = null, pickCircle = null, pickedLatLng = null, pickLayers = null;
+function loadLeaflet(){
+  if(window.L) return Promise.resolve();
+  return new Promise((resolve, reject)=>{
+    const l = document.createElement('link');
+    l.rel = 'stylesheet'; l.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
+    document.head.appendChild(l);
+    const sc = document.createElement('script');
+    sc.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+    sc.onload = resolve; sc.onerror = ()=> reject(new Error('leaflet'));
+    document.head.appendChild(sc);
+  });
+}
+function currentRadius(){
+  const el = document.getElementById('loc-radius-input');
+  return Math.max(30, parseInt(el && el.value, 10) || (state.restaurantLoc && state.restaurantLoc.radius) || DEFAULT_RADIUS);
+}
+function placePick(latlng){
+  pickedLatLng = { lat: latlng.lat, lng: latlng.lng };
+  if(!pickMarker){
+    pickMarker = L.marker(latlng, { draggable:true }).addTo(pickMap);
+    pickMarker.on('drag', e=> placePick(e.target.getLatLng()));
+  } else pickMarker.setLatLng(latlng);
+  if(!pickCircle) pickCircle = L.circle(latlng, { radius: currentRadius(), color:'#e8711a', fillColor:'#e8711a', fillOpacity:0.15 }).addTo(pickMap);
+  else { pickCircle.setLatLng(latlng); pickCircle.setRadius(currentRadius()); }
+  const c = document.getElementById('pick-coords');
+  if(c) c.textContent = `${latlng.lat.toFixed(6)}, ${latlng.lng.toFixed(6)}`;
+}
+async function initPickMap(){
+  const box = document.getElementById('pick-map');
+  if(!box) return;
+  try{ await loadLeaflet(); }
+  catch(e){ box.textContent = 'تعذّر تحميل الخريطة. تأكد من الإنترنت.'; return; }
+  if(!document.getElementById('pick-map')) return;
+  box.innerHTML = ''; box.style.display = 'block';
+  pickMarker = null; pickCircle = null;
+  const saved = state.restaurantLoc;
+  const start = pickedLatLng || (saved ? { lat:saved.lat, lng:saved.lng } : { lat:24.2075, lng:55.7447 }); // العين
+  pickMap = L.map(box, { attributionControl:true }).setView([start.lat, start.lng], (pickedLatLng || saved) ? 18 : 13);
+  pickLayers = {
+    sat: L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom:19, attribution:'Esri' }),
+    street: L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom:19, attribution:'© OpenStreetMap' })
+  };
+  pickLayers.sat.addTo(pickMap);
+  if(pickedLatLng || saved) placePick(L.latLng(start.lat, start.lng));
+  pickMap.on('click', e=> placePick(e.latlng));
+  document.getElementById('map-sat-btn').onclick = ()=>{ pickMap.removeLayer(pickLayers.street); pickLayers.sat.addTo(pickMap); };
+  document.getElementById('map-street-btn').onclick = ()=>{ pickMap.removeLayer(pickLayers.sat); pickLayers.street.addTo(pickMap); };
+  document.getElementById('map-me-btn').onclick = async ()=>{
+    try{ const pos = await getPosition(); pickMap.setView([pos.coords.latitude, pos.coords.longitude], 18); }
+    catch(err){ alert(geoErrorText(err)); }
+  };
+  const ri = document.getElementById('loc-radius-input');
+  if(ri) ri.oninput = ()=>{ if(pickCircle) pickCircle.setRadius(currentRadius()); };
+  document.getElementById('save-map-loc-btn').onclick = saveMapLocation;
+  document.getElementById('close-map-btn').onclick = ()=>{ state.mapOpen = false; pickedLatLng = null; render(); };
+  setTimeout(()=> pickMap.invalidateSize(), 200);
+}
+async function saveMapLocation(){
+  if(!pickedLatLng){ alert('اضغط على مكان المطعم في الخريطة أولاً.'); return; }
+  const loc = { lat:+pickedLatLng.lat.toFixed(6), lng:+pickedLatLng.lng.toFixed(6), radius: currentRadius() };
+  const ok = await settingsSet(LOCATION_KEY, loc);
+  if(!ok){ alert('⚠️ لم يتم الحفظ! تأكد من الإنترنت.'); return; }
+  state.restaurantLoc = loc;
+  state.mapOpen = false; pickedLatLng = null;
+  alert('تم حفظ موقع المطعم من الخريطة ✅');
+  render();
+}
+
 async function saveRadiusOnly(){
   if(!state.restaurantLoc){ alert('حدد موقع المطعم أولاً.'); return; }
   const radius = Math.max(30, parseInt(document.getElementById('loc-radius-input').value, 10) || DEFAULT_RADIUS);
@@ -557,35 +606,6 @@ async function changeEmployeePin(name){
   const ok = await settingsSet(EMPLOYEES_KEY, state.employees);
   if(!ok){ emp.pin = old; alert('⚠️ لم يتم الحفظ! تأكد من الإنترنت.'); return; }
   alert(`تم تغيير الرقم السري لـ ${name} ✅`);
-  render();
-}
-
-// ===== الإدارة: الأجهزة المعتمدة =====
-async function saveDeviceCfg(cfg){
-  const ok = await settingsSet(DEVICES_KEY, cfg);
-  if(!ok){ alert('⚠️ لم يتم الحفظ! تأكد من الإنترنت.'); return false; }
-  state.deviceCfg = cfg;
-  return true;
-}
-async function approveThisDevice(){
-  const name = prompt('اسم لهذا الجهاز (مثال: تابلت الكاشير):', 'جهاز المطعم');
-  if(name === null) return;
-  const cfg = { enabled: state.deviceCfg.enabled, devices: state.deviceCfg.devices.filter(d=>d.id!==DEVICE_ID) };
-  cfg.devices.push({ id: DEVICE_ID, name: name.trim() || 'جهاز', added: todayISO() });
-  await saveDeviceCfg(cfg);
-  render();
-}
-async function removeDevice(id){
-  if(!confirm('إلغاء اعتماد هذا الجهاز؟')) return;
-  await saveDeviceCfg({ enabled: state.deviceCfg.enabled, devices: state.deviceCfg.devices.filter(d=>d.id!==id) });
-  render();
-}
-async function toggleDeviceLock(on){
-  if(on && state.deviceCfg.devices.length === 0){
-    alert('اعتمد جهازًا واحدًا على الأقل قبل التفعيل، وإلا سيتوقف التبصيم.');
-    render(); return;
-  }
-  await saveDeviceCfg({ enabled: on, devices: state.deviceCfg.devices });
   render();
 }
 
@@ -864,8 +884,24 @@ function App(){
           <label style="display:block;margin-bottom:6px;color:var(--muted);font-size:13px;">المسافة المسموحة حول المطعم (بالمتر)</label>
           <input type="number" id="loc-radius-input" min="30" value="${loc ? (loc.radius || DEFAULT_RADIUS) : DEFAULT_RADIUS}">
           <button class="big btn-primary" id="set-loc-btn" style="margin-bottom:10px;">📍 حفظ مكاني الحالي كموقع المطعم</button>
+          <button class="big btn-ghost" id="open-map-btn" style="margin-bottom:10px;">🗺️ اختيار الموقع من الخريطة</button>
           ${loc ? `<button class="big btn-ghost" id="save-radius-btn">حفظ المسافة فقط</button>` : ''}
         </div>
+        ${state.mapOpen ? `
+        <div class="card" id="map-card">
+          <b style="font-size:14px;">🗺️ اختر موقع المطعم من الخريطة</b>
+          <p style="color:var(--muted);font-size:13px;line-height:1.7;margin:6px 0 10px;">اضغط على مكان المطعم في الخريطة، أو اسحب الدبوس. الدائرة توضح المسافة المسموحة.</p>
+          <div style="display:flex;gap:6px;margin-bottom:8px;">
+            <button class="btn-ghost" id="map-sat-btn" style="flex:1;padding:9px;font-size:13px;">🛰️ قمر صناعي</button>
+            <button class="btn-ghost" id="map-street-btn" style="flex:1;padding:9px;font-size:13px;">🗺️ شوارع</button>
+            <button class="btn-ghost" id="map-me-btn" style="flex:1;padding:9px;font-size:13px;">📍 مكاني</button>
+          </div>
+          <div id="pick-map" style="height:360px;border-radius:12px;overflow:hidden;border:1px solid var(--line);background:#eee;display:flex;align-items:center;justify-content:center;color:#888;">جارِ تحميل الخريطة...</div>
+          <div id="pick-coords" style="text-align:center;font-size:12px;color:var(--muted);margin:8px 0;"></div>
+          <button class="big btn-primary" id="save-map-loc-btn" style="margin-bottom:8px;">✅ حفظ هذا الموقع</button>
+          <button class="big btn-ghost" id="close-map-btn">إلغاء</button>
+        </div>
+        ` : ''}
       `;
       content.insertAdjacentHTML('beforeend', `
         <div class="card">
@@ -878,44 +914,9 @@ function App(){
         </div>
       `);
       document.getElementById('change-pass-btn').onclick = changeAdminPassword;
-      const dcfg = state.deviceCfg;
-      const thisApproved = dcfg.devices.some(d=>d.id===DEVICE_ID);
-      content.insertAdjacentHTML('beforeend', `
-        <div class="card">
-          <b style="font-size:14px;">الأجهزة المعتمدة للتبصيم</b>
-          <p style="color:var(--muted);font-size:13px;line-height:1.7;margin:8px 0 12px;">
-            عند التفعيل، لا يقبل الموقع التبصيم إلا من الأجهزة التي اعتمدتها هنا (مثل جوال أو تابلت المطعم) — حتى لو كان الموظف قريبًا.
-          </p>
-          <label style="display:flex;align-items:center;gap:10px;margin-bottom:12px;font-weight:700;">
-            <input type="checkbox" id="dev-lock-toggle" ${dcfg.enabled?'checked':''} style="width:22px;height:22px;accent-color:var(--accent);">
-            التبصيم من الأجهزة المعتمدة فقط
-          </label>
-          ${thisApproved
-            ? `<div class="msg msg-success">✅ هذا الجهاز معتمد</div>`
-            : `<button class="big btn-primary" id="approve-dev-btn" style="margin-bottom:10px;">➕ اعتماد هذا الجهاز</button>`}
-          <div id="dev-list"></div>
-        </div>
-      `);
-      const devList = document.getElementById('dev-list');
-      if(dcfg.devices.length === 0){
-        devList.innerHTML = `<div style="color:var(--muted);font-size:13px;">لا توجد أجهزة معتمدة بعد</div>`;
-      } else {
-        dcfg.devices.forEach(d=>{
-          const row = document.createElement('div');
-          row.className = 'item-row';
-          row.innerHTML = `<span>${d.name}${d.id===DEVICE_ID?' <span style="color:var(--good);font-size:12px;">(هذا الجهاز)</span>':''}<br><span style="color:var(--muted);font-size:11px;">أضيف ${isoToDisplay(d.added)}</span></span>`;
-          const del = document.createElement('button');
-          del.className = 'btn-ghost'; del.style.color = 'var(--danger)'; del.style.padding = '6px 12px'; del.style.fontSize = '12px';
-          del.textContent = 'إلغاء';
-          del.onclick = ()=> removeDevice(d.id);
-          row.appendChild(del);
-          devList.appendChild(row);
-        });
-      }
-      document.getElementById('dev-lock-toggle').onchange = (e)=> toggleDeviceLock(e.target.checked);
-      const apb = document.getElementById('approve-dev-btn');
-      if(apb) apb.onclick = approveThisDevice;
       document.getElementById('set-loc-btn').onclick = setRestaurantLocationHere;
+      document.getElementById('open-map-btn').onclick = ()=>{ state.mapOpen = true; render(); setTimeout(()=>{ const c=document.getElementById('map-card'); if(c) c.scrollIntoView({behavior:'smooth'}); }, 50); };
+      if(state.mapOpen) initPickMap();
       const rb = document.getElementById('save-radius-btn');
       if(rb) rb.onclick = saveRadiusOnly;
     } else {
