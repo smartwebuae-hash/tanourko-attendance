@@ -166,7 +166,9 @@ function defaultEmployees(){ return []; }
 function normalizeEmployee(e){
   if(typeof e === 'string') return { name: e, pin: '' };
   return { name: e.name, pin: e.pin || '', shiftStart: e.shiftStart || '', shiftEnd: e.shiftEnd || '',
-           dayOff: (e.dayOff === 0 || e.dayOff) ? String(e.dayOff) : '', added: e.added || '' };
+           dayOff: (e.dayOff === 0 || e.dayOff) ? String(e.dayOff) : '', added: e.added || '',
+           graceLate: (e.graceLate === 0 || e.graceLate) ? String(e.graceLate) : '',
+           graceEarly: (e.graceEarly === 0 || e.graceEarly) ? String(e.graceEarly) : '' };
 }
 // ===== ساعات العمل الصافية (بعد خصم الراحة) + الإجازة الأسبوعية =====
 function netHours(rec){
@@ -214,16 +216,30 @@ function shiftOf(rec){
     end: rec.shiftEnd || (emp && emp.shiftEnd) || ''
   };
 }
-function lateMins(rec){
+// ===== مدة السماح: 15 دقيقة للجميع، و30 دقيقة للخروج المبكر لأمين ومحمد عيد =====
+const DEFAULT_GRACE = 15;
+const SPECIAL_EARLY_GRACE = 30;
+function normName(n){ return String(n||'').replace(/[أإآ]/g,'ا').replace(/ة/g,'ه').replace(/ى/g,'ي').replace(/\s+/g,' ').trim(); }
+function isSpecialEmp(name){ const n = normName(name); return n === 'امين' || n === 'محمد عيد'; }
+function graceFor(name){
+  const emp = findEmployee(name) || {};
+  const late = (emp.graceLate !== undefined && emp.graceLate !== '') ? +emp.graceLate : DEFAULT_GRACE;
+  const early = (emp.graceEarly !== undefined && emp.graceEarly !== '') ? +emp.graceEarly : (isSpecialEmp(name) ? SPECIAL_EARLY_GRACE : DEFAULT_GRACE);
+  return { late, early };
+}
+function rawLate(rec){
   const sh = shiftOf(rec); const a = toMins(rec.timeIn), b = toMins(sh.start);
   if(a===null || b===null) return 0;
   return Math.max(0, wrapDiff(a - b));
 }
-function earlyMins(rec){
+function rawEarly(rec){
   const sh = shiftOf(rec); const a = toMins(rec.timeOut), b = toMins(sh.end);
   if(a===null || b===null) return 0;
   return Math.max(0, wrapDiff(b - a));
 }
+// ضمن مدة السماح = منضبط (صفر). أكثر من السماح = تُحسب الدقائق كاملة.
+function lateMins(rec){ const m = rawLate(rec); return m > graceFor(rec.employee).late ? m : 0; }
+function earlyMins(rec){ const m = rawEarly(rec); return m > graceFor(rec.employee).early ? m : 0; }
 function notesHtml(rec){
   const parts = [];
   const l = lateMins(rec), e = earlyMins(rec);
@@ -623,11 +639,15 @@ async function saveEmployeeShift(name){
   const st = document.getElementById('edit-shift-start').value || '';
   const en = document.getElementById('edit-shift-end').value || '';
   const off = document.getElementById('edit-shift-off').value;
+  const gl = document.getElementById('edit-grace-late').value.trim();
+  const ge = document.getElementById('edit-grace-early').value.trim();
   if((st && !en) || (!st && en)){ alert('اكتب وقت الدخول ووقت الخروج معًا، أو اتركهما فاضيين.'); return; }
-  const old = { s: emp.shiftStart, e: emp.shiftEnd, o: emp.dayOff };
+  const old = { s: emp.shiftStart, e: emp.shiftEnd, o: emp.dayOff, gl: emp.graceLate, ge: emp.graceEarly };
   emp.shiftStart = st; emp.shiftEnd = en; emp.dayOff = off;
+  emp.graceLate = gl === '' ? '' : String(Math.max(0, parseInt(gl,10) || 0));
+  emp.graceEarly = ge === '' ? '' : String(Math.max(0, parseInt(ge,10) || 0));
   const ok = await settingsSet(EMPLOYEES_KEY, state.employees);
-  if(!ok){ emp.shiftStart = old.s; emp.shiftEnd = old.e; emp.dayOff = old.o; alert('⚠️ لم يتم الحفظ! تأكد من الإنترنت.'); return; }
+  if(!ok){ emp.shiftStart = old.s; emp.shiftEnd = old.e; emp.dayOff = old.o; emp.graceLate = old.gl; emp.graceEarly = old.ge; alert('⚠️ لم يتم الحفظ! تأكد من الإنترنت.'); return; }
   state.editingShift = null;
   render();
 }
@@ -1003,7 +1023,7 @@ function App(){
         state.employees.forEach(emp=>{
           const row = document.createElement('div');
           row.className = 'item-row';
-          row.innerHTML = `<span>${emp.name} <span style="color:var(--muted);font-size:12px;">(رقم: ${emp.pin||'-'})</span><br><span style="color:var(--accent-dark);font-size:12px;">⏰ ${shiftLabel(emp)} • 🏖️ إجازة: ${offLabel(emp)}</span></span>`;
+          row.innerHTML = `<span>${emp.name} <span style="color:var(--muted);font-size:12px;">(رقم: ${emp.pin||'-'})</span><br><span style="color:var(--accent-dark);font-size:12px;">⏰ ${shiftLabel(emp)} • 🏖️ إجازة: ${offLabel(emp)}</span><br><span style="color:var(--muted);font-size:11px;">⏳ سماح: تأخير ${graceFor(emp.name).late}د • خروج مبكر ${graceFor(emp.name).early}د</span></span>`;
           const delBtn = document.createElement('button');
           delBtn.className = 'btn-ghost';
           delBtn.style.color = 'var(--danger)';
@@ -1042,6 +1062,10 @@ function App(){
               <div style="display:flex;gap:8px;margin-top:8px;">
                 <label style="flex:1;font-size:12px;color:var(--muted);">وقت الدخول<input type="time" id="edit-shift-start" value="${emp.shiftStart}"></label>
                 <label style="flex:1;font-size:12px;color:var(--muted);">وقت الخروج<input type="time" id="edit-shift-end" value="${emp.shiftEnd}"></label>
+              </div>
+              <div style="display:flex;gap:8px;">
+                <label style="flex:1;font-size:12px;color:var(--muted);">سماح التأخير (دقيقة)<input type="number" min="0" id="edit-grace-late" value="${graceFor(emp.name).late}"></label>
+                <label style="flex:1;font-size:12px;color:var(--muted);">سماح الخروج المبكر (دقيقة)<input type="number" min="0" id="edit-grace-early" value="${graceFor(emp.name).early}"></label>
               </div>
               <label style="display:block;font-size:12px;color:var(--muted);">يوم الإجازة الأسبوعية
                 <select class="sel" id="edit-shift-off" style="margin-top:4px;">
