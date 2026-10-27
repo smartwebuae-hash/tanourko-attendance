@@ -40,6 +40,11 @@
   .status-in{color:var(--good);font-weight:800;}
   .status-out{color:var(--muted);}
   .status-none{color:var(--muted);}
+  select.sel{width:100%;background:var(--surface-2);border:1px solid var(--line);color:var(--text);padding:12px;border-radius:10px;font-size:15px;margin-bottom:12px;font-family:inherit;}
+  .tag{display:inline-block;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:800;}
+  .tag-abs{background:#fdecec;color:#b02a2a;}
+  .tag-off{background:#eef3ff;color:#2a5bb0;}
+  .tag-in{background:#e9f7ee;color:#1f7a3d;}
   .back-link{color:var(--accent-dark);font-size:13px;background:none;border:none;padding:6px 0;margin-bottom:10px;text-decoration:underline;cursor:pointer;}
   .msg{font-size:13px;padding:10px 12px;border-radius:10px;margin-bottom:14px;text-align:center;font-weight:700;line-height:1.6;}
   .msg-error{background:#fdecec;color:#b02a2a;border:1px solid #f3bcbc;}
@@ -51,8 +56,8 @@
   tbody td{padding:6px 5px;border:1px solid var(--line);text-align:center;color:var(--text);}
   tbody tr:nth-child(even){background:var(--surface-2);}
   .table-wrap{overflow-x:auto;border-radius:10px;border:1px solid var(--line);margin-bottom:14px;}
-  .tabs{display:flex;gap:6px;margin-bottom:14px;}
-  .tab{flex:1;text-align:center;padding:10px 4px;border-radius:10px;background:var(--surface-2);border:1px solid var(--line);color:var(--muted);font-size:13px;cursor:pointer;}
+  .tabs{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px;}
+  .tab{flex:1 1 calc(33% - 6px);text-align:center;padding:10px 4px;border-radius:10px;background:var(--surface-2);border:1px solid var(--line);color:var(--muted);font-size:13px;cursor:pointer;}
   .tab.active{background:var(--accent);color:#fff;border-color:var(--accent);}
   .item-row{display:flex;justify-content:space-between;align-items:center;padding:9px 0;border-bottom:1px solid var(--line);font-size:14px;}
   .item-row:last-child{border-bottom:none;}
@@ -104,6 +109,8 @@ const LOGO_URL = 'logo.png';
 const EMPLOYEES_KEY = 'attendance_employees';
 const RECORDS_KEY = 'attendance_records';
 const ADMIN_PASS_KEY = 'attendance_admin_pass';
+const REST_KEY = 'attendance_rest_hours'; // ساعات الراحة التي تُخصم يوميًا
+const DAY_NAMES_AR = ['الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];
 const NOTIFICATIONS_KEY = 'attendance_notifications';
 const LOCATION_KEY = 'attendance_location'; // جديد: موقع المطعم المسموح التبصيم منه
 const DEFAULT_PASS = 'Tanourko2026';
@@ -158,7 +165,39 @@ function hoursBetween(timeIn, timeOut){
 function defaultEmployees(){ return []; }
 function normalizeEmployee(e){
   if(typeof e === 'string') return { name: e, pin: '' };
-  return { name: e.name, pin: e.pin || '', shiftStart: e.shiftStart || '', shiftEnd: e.shiftEnd || '' };
+  return { name: e.name, pin: e.pin || '', shiftStart: e.shiftStart || '', shiftEnd: e.shiftEnd || '',
+           dayOff: (e.dayOff === 0 || e.dayOff) ? String(e.dayOff) : '', added: e.added || '' };
+}
+// ===== ساعات العمل الصافية (بعد خصم الراحة) + الإجازة الأسبوعية =====
+function netHours(rec){
+  const g = hoursBetween(rec.timeIn, rec.timeOut);
+  if(g === null) return null;
+  return Math.max(0, parseFloat(g) - (state.restHours || 0));
+}
+function fmtH(h){ return (h === null || h === undefined) ? '-' : h.toFixed(1); }
+function weekdayOf(iso){ const [y,m,d] = iso.split('-').map(Number); return new Date(y, m-1, d).getDay(); }
+function dayNameOf(iso){ return DAY_NAMES_AR[weekdayOf(iso)]; }
+function isOffDay(emp, iso){ return !!emp && emp.dayOff !== '' && String(weekdayOf(iso)) === String(emp.dayOff); }
+function offLabel(emp){ return emp.dayOff !== '' ? DAY_NAMES_AR[+emp.dayOff] : 'بدون'; }
+function empStartDate(emp){
+  if(emp.added) return emp.added;
+  const ds = state.records.filter(r=>r.employee===emp.name).map(r=>r.date).sort();
+  return ds[0] || null;
+}
+function monthStats(emp, mKey){
+  const [y,m] = mKey.split('-').map(Number);
+  const days = new Date(y, m, 0).getDate();
+  const start = empStartDate(emp), today = todayISO();
+  const have = new Set(state.records.filter(r=>r.employee===emp.name && monthKey(r.date)===mKey).map(r=>r.date));
+  let absent = 0, off = 0, workedOff = 0;
+  for(let d=1; d<=days; d++){
+    const iso = `${y}-${pad(m)}-${pad(d)}`;
+    if(iso > today) break;
+    if(!start || iso < start) continue;
+    if(isOffDay(emp, iso)){ off++; if(have.has(iso)) workedOff++; continue; }
+    if(!have.has(iso)) absent++;
+  }
+  return { absent, off, workedOff };
 }
 // ===== حساب التأخير والخروج المبكر =====
 function toMins(t){ if(!t || !/^\d{1,2}:\d{2}$/.test(t)) return null; const [h,m]=t.split(':').map(Number); return h*60+m; }
@@ -214,7 +253,7 @@ function header(subText){
 let state = {
   loading:true, employees:[], records:[], notifications:[], view:'staff',
   selectedEmployee:null, message:null, busy:false,
-  adminLoggedIn:false, adminPass:'', adminError:null, adminTab:'report',
+  adminLoggedIn:false, adminPass:'', adminError:null, adminTab:'daily', currentDay: todayISO(), restHours:2, editingShift:null,
   newEmployeeName:'', newEmployeePin:'', currentMonth: monthKey(todayISO()),
   empLoginName:'', empLoginPin:'', empLoginError:null, loggedEmployee:null,
   notifTargetEmployee:'', notifMessage:'',
@@ -240,6 +279,8 @@ async function init(){
   storedAdminPass = pass;
 
   state.restaurantLoc = await settingsGet(LOCATION_KEY);
+  const rh = await settingsGet(REST_KEY);
+  if(rh !== null && rh !== undefined && !isNaN(parseFloat(rh))) state.restHours = parseFloat(rh);
 
   state.loading = false;
   render();
@@ -391,10 +432,11 @@ async function addEmployee(){
   const pin = state.newEmployeePin.trim();
   const shiftStart = (document.getElementById('new-emp-start')||{}).value || '';
   const shiftEnd = (document.getElementById('new-emp-end')||{}).value || '';
+  const dayOff = (document.getElementById('new-emp-off')||{}).value || '';
   if(!name) return;
   if(!pin){ alert('اكتب رقم/PIN خاص بالموظف.'); return; }
   if(state.employees.some(e=>e.name===name)){ alert('هذا الموظف مضاف أصلاً.'); return; }
-  state.employees.push({ name, pin, shiftStart, shiftEnd });
+  state.employees.push({ name, pin, shiftStart, shiftEnd, dayOff, added: todayISO() });
   const ok = await settingsSet(EMPLOYEES_KEY, state.employees);
   if(!ok){ state.employees.pop(); alert('⚠️ لم يتم الحفظ! تأكد من الإنترنت.'); render(); return; }
   state.newEmployeeName = '';
@@ -413,7 +455,7 @@ async function addManualRecord(){
   const namesList = state.employees.map(e=>e.name).join('، ');
   const name = prompt(`اسم الموظف بالضبط (من: ${namesList}):`);
   if(!name || !findEmployee(name.trim())) { if(name!==null) alert('اسم غير موجود بالقائمة.'); return; }
-  const date = prompt('التاريخ (YYYY-MM-DD):', todayISO()) || todayISO();
+  const date = prompt('التاريخ (YYYY-MM-DD):', state.adminTab==='daily' ? state.currentDay : todayISO()) || todayISO();
   const timeIn = prompt('وقت الدخول (HH:MM):', '08:00');
   if(timeIn === null) return;
   const timeOut = prompt('وقت الخروج (HH:MM) — اتركه فاضي لو لسا ما انصرف:', '') || null;
@@ -574,26 +616,66 @@ async function changeAdminPassword(){
   alert('تم تغيير كلمة مرور الإدارة ✅ احفظها في مكان آمن.');
   render();
 }
-async function changeEmployeeShift(name){
+function changeEmployeeShift(name){ state.editingShift = name; render(); }
+async function saveEmployeeShift(name){
   const emp = findEmployee(name);
   if(!emp) return;
-  const st = prompt(`وقت دخول "${name}" بنظام 24 ساعة (مثال 12:00) — اتركه فاضي لإلغاء الدوام:`, emp.shiftStart || '12:00');
-  if(st === null) return;
-  let en = '';
-  if(st.trim()){
-    if(toMins(st.trim())===null){ alert('اكتب الوقت بهذا الشكل: 12:00'); return; }
-    en = prompt(`وقت خروج "${name}" بنظام 24 ساعة (مثال 21:00 يعني 9 مساءً):`, emp.shiftEnd || '21:00');
-    if(en === null) return;
-    if(toMins(en.trim())===null){ alert('اكتب الوقت بهذا الشكل: 21:00'); return; }
-  }
-  const old = { s: emp.shiftStart, e: emp.shiftEnd };
-  emp.shiftStart = st.trim() ? pad(Math.floor(toMins(st.trim())/60)) + ':' + pad(toMins(st.trim())%60) : '';
-  emp.shiftEnd = en.trim() ? pad(Math.floor(toMins(en.trim())/60)) + ':' + pad(toMins(en.trim())%60) : '';
+  const st = document.getElementById('edit-shift-start').value || '';
+  const en = document.getElementById('edit-shift-end').value || '';
+  const off = document.getElementById('edit-shift-off').value;
+  if((st && !en) || (!st && en)){ alert('اكتب وقت الدخول ووقت الخروج معًا، أو اتركهما فاضيين.'); return; }
+  const old = { s: emp.shiftStart, e: emp.shiftEnd, o: emp.dayOff };
+  emp.shiftStart = st; emp.shiftEnd = en; emp.dayOff = off;
   const ok = await settingsSet(EMPLOYEES_KEY, state.employees);
-  if(!ok){ emp.shiftStart = old.s; emp.shiftEnd = old.e; alert('⚠️ لم يتم الحفظ! تأكد من الإنترنت.'); return; }
-  alert(`تم حفظ دوام ${name}: ${shiftLabel(emp)} ✅\n(ينطبق على التبصيمات الجديدة)`);
+  if(!ok){ emp.shiftStart = old.s; emp.shiftEnd = old.e; emp.dayOff = old.o; alert('⚠️ لم يتم الحفظ! تأكد من الإنترنت.'); return; }
+  state.editingShift = null;
   render();
 }
+async function saveRestHours(){
+  const v = parseFloat(document.getElementById('rest-hours-input').value);
+  if(isNaN(v) || v < 0 || v > 8){ alert('اكتب عدد ساعات صحيح (مثال: 2).'); return; }
+  const ok = await settingsSet(REST_KEY, v);
+  if(!ok){ alert('⚠️ لم يتم الحفظ! تأكد من الإنترنت.'); return; }
+  state.restHours = v;
+  alert(`تم الحفظ ✅ — يُخصم ${v} ساعة راحة من كل يوم عمل لكل موظف.`);
+  render();
+}
+function shiftDay(delta){
+  const [y,m,d] = state.currentDay.split('-').map(Number);
+  const dt = new Date(y, m-1, d+delta);
+  state.currentDay = `${dt.getFullYear()}-${pad(dt.getMonth()+1)}-${pad(dt.getDate())}`;
+  render();
+}
+async function exportArea(areaId, filenameBase){
+  const target = document.getElementById(areaId);
+  if(!target || typeof html2canvas === 'undefined'){ alert('تعذّر تحميل أداة التصوير.'); return; }
+  let canvas;
+  try{
+    canvas = await html2canvas(target, {
+      backgroundColor:'#ffffff', scale:2, useCORS:true,
+      windowWidth: target.scrollWidth, windowHeight: target.scrollHeight,
+      width: target.scrollWidth, height: target.scrollHeight
+    });
+  }catch(e){ alert('تعذّر إنشاء صورة الكشف.'); return; }
+  await shareOrDownloadPdf(canvas, filenameBase);
+}
+function dailyRows(iso){
+  const rows = [];
+  const recs = state.records.filter(r=>r.date===iso);
+  state.employees.forEach(emp=>{
+    const r = recs.find(x=>x.employee===emp.name);
+    const start = empStartDate(emp);
+    let status;
+    if(r) status = isOffDay(emp, iso) ? 'workedOff' : 'present';
+    else if(isOffDay(emp, iso)) status = 'off';
+    else if(iso > todayISO() || !start || iso < start) status = 'na';
+    else status = 'absent';
+    rows.push({ name: emp.name, rec: r || null, status });
+  });
+  recs.forEach(r=>{ if(!findEmployee(r.employee)) rows.push({ name: r.employee, rec: r, status:'present' }); });
+  return rows;
+}
+
 async function changeEmployeePin(name){
   const emp = findEmployee(name);
   if(!emp) return;
@@ -719,12 +801,14 @@ function App(){
     monthRecs.forEach(r=>{
       const h = hoursBetween(r.timeIn, r.timeOut);
       if(!totalsByEmployee[r.employee]) totalsByEmployee[r.employee] = { days:0, hours:0, late:0, early:0, lateDays:0, earlyDays:0 };
+      const nh = netHours(r);
       const _l = lateMins(r), _e = earlyMins(r);
       totalsByEmployee[r.employee].late += _l; if(_l>0) totalsByEmployee[r.employee].lateDays++;
       totalsByEmployee[r.employee].early += _e; if(_e>0) totalsByEmployee[r.employee].earlyDays++;
       totalsByEmployee[r.employee].days += 1;
-      if(h) totalsByEmployee[r.employee].hours += parseFloat(h);
+      if(nh !== null) totalsByEmployee[r.employee].hours += nh;
     });
+    state.employees.forEach(emp=>{ if(!totalsByEmployee[emp.name]) totalsByEmployee[emp.name] = { days:0, hours:0, late:0, early:0, lateDays:0, earlyDays:0 }; });
 
     app.innerHTML = `
       ${header('كشف الحضور الشهري')}
@@ -732,7 +816,8 @@ function App(){
       ${messageBox()}
       ${!state.restaurantLoc ? `<div class="msg msg-error no-print">⚠️ لم يتم تحديد موقع المطعم بعد — التبصيم متوقف. افتح تبويب 📍 الحماية من داخل المطعم.</div>` : ''}
       <div class="tabs no-print">
-        <div class="tab ${state.adminTab==='report'?'active':''}" data-tab="report">📋 الكشف</div>
+        <div class="tab ${state.adminTab==='daily'?'active':''}" data-tab="daily">📅 اليومي</div>
+        <div class="tab ${state.adminTab==='report'?'active':''}" data-tab="report">📋 الشهري</div>
         <div class="tab ${state.adminTab==='employees'?'active':''}" data-tab="employees">👥 الموظفين</div>
         <div class="tab ${state.adminTab==='notify'?'active':''}" data-tab="notify">📣 التنبيهات</div>
         <div class="tab ${state.adminTab==='location'?'active':''}" data-tab="location">📍 الحماية</div>
@@ -743,7 +828,73 @@ function App(){
     app.querySelectorAll('.tab').forEach(tb=>{ tb.onclick = ()=>{ state.adminTab = tb.dataset.tab; render(); }; });
 
     const content = document.getElementById('admin-content');
-    if(state.adminTab === 'report'){
+    if(state.adminTab === 'daily'){
+      const iso = state.currentDay;
+      const rows = dailyRows(iso);
+      let cPresent=0, cAbsent=0, cOff=0, sumH=0;
+      const body = rows.map(x=>{
+        const r = x.rec;
+        if(x.status==='present' || x.status==='workedOff') cPresent++;
+        if(x.status==='absent') cAbsent++;
+        if(x.status==='off') cOff++;
+        const nh = r ? netHours(r) : null; if(nh !== null) sumH += nh;
+        let note;
+        if(x.status==='absent') note = '<span class="tag tag-abs">غائب</span>';
+        else if(x.status==='off') note = '<span class="tag tag-off">إجازة أسبوعية</span>';
+        else if(x.status==='na') note = '-';
+        else note = (x.status==='workedOff' ? '<span class="tag tag-in">عمل في إجازته</span>' : '') + notesHtml(r);
+        return `<tr>
+          <td style="font-weight:700;">${x.name}</td>
+          <td ${r?`style="cursor:pointer;text-decoration:underline;" data-edit="${r.id}|timeIn"`:''}>${r ? (r.timeIn||'-') : '-'}</td>
+          <td ${r?`style="cursor:pointer;text-decoration:underline;" data-edit="${r.id}|timeOut"`:''}>${r ? (r.timeOut||'لم يخرج') : '-'}</td>
+          <td>${r ? (hoursBetween(r.timeIn,r.timeOut)||'-') : '-'}</td>
+          <td style="font-weight:800;">${r ? fmtH(nh) : '-'}</td>
+          <td style="font-size:11px;">${note}</td>
+        </tr>`;
+      }).join('') || `<tr><td colspan="6" style="padding:16px;color:var(--muted);">لا يوجد موظفون</td></tr>`;
+      content.innerHTML = `
+        <div class="month-nav no-print">
+          <button class="btn-ghost" id="prev-day-btn" style="padding:8px 14px;">◀</button>
+          <span class="month-label">${dayNameOf(iso)} ${isoToDisplay(iso)}</span>
+          <button class="btn-ghost" id="next-day-btn" style="padding:8px 14px;">▶</button>
+        </div>
+        ${iso !== todayISO() ? `<button class="back-link no-print" id="today-btn" style="display:block;margin:-6px auto 8px;">العودة لليوم</button>` : ''}
+        <button class="big btn-ghost no-print" id="add-manual-rec-btn" style="margin-bottom:12px;">+ إضافة / تصحيح سجل يدويًا</button>
+        <div id="daily-capture-area" style="background:var(--surface);padding:10px;border-radius:12px;">
+          <div style="text-align:center;">
+            <img src="${LOGO_URL}" alt="" onerror="this.style.display='none'" style="width:60px;height:60px;border-radius:50%;object-fit:cover;">
+            <h2 style="font-size:16px;margin:6px 0 2px;">كشف الحضور اليومي — تنوركو</h2>
+            <div style="font-size:14px;font-weight:800;color:var(--accent-dark);margin-bottom:10px;">${dayNameOf(iso)} ${isoToDisplay(iso)}</div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>الموظف</th><th>الدخول</th><th>الخروج</th><th>الساعات</th><th>ساعات العمل</th><th>ملاحظات</th></tr></thead>
+              <tbody>${body}</tbody>
+            </table>
+          </div>
+          <div class="card" style="margin-bottom:0;">
+            <div class="item-row"><span>✅ حاضر</span><b>${cPresent}</b></div>
+            <div class="item-row"><span>❌ غائب</span><b>${cAbsent}</b></div>
+            <div class="item-row"><span>🏖️ إجازة أسبوعية</span><b>${cOff}</b></div>
+            <div class="item-row"><span>⏱️ مجموع ساعات العمل</span><b>${sumH.toFixed(1)} ساعة</b></div>
+            <div style="font-size:11px;color:var(--muted);margin-top:6px;">«ساعات العمل» = الساعات بعد خصم ${state.restHours} ساعة راحة لكل موظف.</div>
+          </div>
+        </div>
+        <div class="actions-bar no-print" style="margin-top:14px;">
+          <button class="btn-primary" id="export-daily-btn">📲 PDF وإرسال واتساب</button>
+          <button class="btn-ghost" id="print-daily-btn">🖨️ طباعة</button>
+        </div>
+      `;
+      document.getElementById('prev-day-btn').onclick = ()=> shiftDay(-1);
+      document.getElementById('next-day-btn').onclick = ()=> shiftDay(1);
+      const tb = document.getElementById('today-btn'); if(tb) tb.onclick = ()=>{ state.currentDay = todayISO(); render(); };
+      document.getElementById('add-manual-rec-btn').onclick = addManualRecord;
+      document.getElementById('export-daily-btn').onclick = ()=> exportArea('daily-capture-area', 'كشف-يومي-تنوركو-' + iso);
+      document.getElementById('print-daily-btn').onclick = ()=> window.print();
+      content.querySelectorAll('[data-edit]').forEach(cell=>{
+        cell.onclick = ()=>{ const [recId, field] = cell.dataset.edit.split('|'); editRecordTime(recId, field); };
+      });
+    } else if(state.adminTab === 'report'){
       const rowsHtml = monthRecs.length === 0
         ? `<tr><td colspan="7" style="padding:16px;color:var(--muted);">لا توجد سجلات بهذا الشهر</td></tr>`
         : monthRecs.map(r=>`
@@ -752,7 +903,7 @@ function App(){
               <td>${r.employee}${r.manual ? ' <span style="color:var(--muted);font-size:11px;">(يدوي)</span>' : ''}</td>
               <td style="cursor:pointer;text-decoration:underline;" data-edit="${r.id}|timeIn">${r.timeIn||'-'}${r.inLoc ? `<div style="font-size:10px;color:var(--muted);text-decoration:none;">📍${r.inLoc.dist}م</div>` : ''}</td>
               <td style="cursor:pointer;text-decoration:underline;" data-edit="${r.id}|timeOut">${r.timeOut||'-'}${r.outLoc ? `<div style="font-size:10px;color:var(--muted);text-decoration:none;">📍${r.outLoc.dist}م</div>` : ''}</td>
-              <td>${hoursBetween(r.timeIn,r.timeOut) || '-'}</td>
+              <td>${fmtH(netHours(r))}</td>
               <td style="font-size:11px;">${notesHtml(r)}</td>
               <td class="no-print"><button data-del-rec="${r.id}" style="background:none;border:none;color:var(--danger);cursor:pointer;">🗑️</button></td>
             </tr>
@@ -760,9 +911,12 @@ function App(){
       const totalsHtml = Object.keys(totalsByEmployee).length === 0 ? '' : `
         <div class="card">
           <b style="font-size:14px;">إجمالي الشهر لكل موظف</b>
+          <div style="font-size:11px;color:var(--muted);margin-top:2px;">ساعات العمل بعد خصم ${state.restHours} ساعة راحة يوميًا</div>
           ${Object.entries(totalsByEmployee).map(([name,t])=>`
             <div class="item-row" style="display:block;">
-              <div style="display:flex;justify-content:space-between;"><b>${name}</b><span>${t.days} يوم — ${t.hours.toFixed(1)} ساعة</span></div>
+              <div style="display:flex;justify-content:space-between;"><b>${name}</b><span>${t.days} يوم — ${t.hours.toFixed(1)} ساعة عمل</span></div>
+              ${(()=>{ const emp = findEmployee(name); if(!emp) return ''; const ms = monthStats(emp, state.currentMonth);
+                return `<div style="font-size:12px;margin-top:3px;">${ms.absent>0?`<span class="tag tag-abs">غياب ${ms.absent} يوم</span> `:''}<span class="tag tag-off">إجازة ${ms.off} يوم (${offLabel(emp)})</span>${ms.workedOff>0?` <span class="tag tag-in">عمل في إجازته ${ms.workedOff}</span>`:''}</div>`; })()}
               ${t.late>0 ? `<div style="color:var(--danger);font-size:12px;margin-top:3px;">تأخير: ${fmtMins(t.late)} (${t.lateDays} يوم)</div>` : ''}
               ${t.early>0 ? `<div style="color:var(--danger);font-size:12px;margin-top:3px;">خروج مبكر: ${fmtMins(t.early)} (${t.earlyDays} يوم)</div>` : ''}
             </div>
@@ -783,7 +937,7 @@ function App(){
           </div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>التاريخ</th><th>الموظف</th><th>الدخول</th><th>الخروج</th><th>الساعات</th><th>ملاحظات</th><th class="no-print"></th></tr></thead>
+              <thead><tr><th>التاريخ</th><th>الموظف</th><th>الدخول</th><th>الخروج</th><th>ساعات العمل</th><th>ملاحظات</th><th class="no-print"></th></tr></thead>
               <tbody>${rowsHtml}</tbody>
             </table>
           </div>
@@ -818,7 +972,20 @@ function App(){
             <label style="flex:1;font-size:12px;color:var(--muted);">وقت الدخول<input type="time" id="new-emp-start" value="12:00" class="time-in"></label>
             <label style="flex:1;font-size:12px;color:var(--muted);">وقت الخروج<input type="time" id="new-emp-end" value="21:00" class="time-in"></label>
           </div>
+          <label style="display:block;font-size:12px;color:var(--muted);">يوم الإجازة الأسبوعية
+            <select class="sel" id="new-emp-off" style="margin-top:4px;">
+              <option value="">بدون إجازة</option>
+              ${DAY_NAMES_AR.map((d,i)=>`<option value="${i}">${d}</option>`).join('')}
+            </select>
+          </label>
           <button class="big btn-primary" id="add-emp-btn">إضافة</button>
+        </div>
+        <div class="card">
+          <label style="display:block;margin-bottom:6px;color:var(--muted);font-size:13px;">ساعات الراحة التي تُخصم يوميًا من كل موظف</label>
+          <div style="display:flex;gap:8px;">
+            <input type="number" id="rest-hours-input" min="0" max="8" step="0.5" value="${state.restHours}" style="margin-bottom:0;">
+            <button class="btn-primary" id="save-rest-btn" style="padding:0 18px;white-space:nowrap;">حفظ</button>
+          </div>
         </div>
         <div class="card">
           <b style="font-size:14px;">الموظفون الحاليون</b>
@@ -828,6 +995,7 @@ function App(){
       document.getElementById('new-emp-input').oninput = (e)=>{ state.newEmployeeName = e.target.value; };
       document.getElementById('new-emp-pin-input').oninput = (e)=>{ state.newEmployeePin = e.target.value; };
       document.getElementById('add-emp-btn').onclick = addEmployee;
+      document.getElementById('save-rest-btn').onclick = saveRestHours;
       const list = document.getElementById('emp-list');
       if(state.employees.length === 0){
         list.innerHTML = `<div style="color:var(--muted);font-size:13px;">لا يوجد موظفون بعد</div>`;
@@ -835,7 +1003,7 @@ function App(){
         state.employees.forEach(emp=>{
           const row = document.createElement('div');
           row.className = 'item-row';
-          row.innerHTML = `<span>${emp.name} <span style="color:var(--muted);font-size:12px;">(رقم: ${emp.pin||'-'})</span><br><span style="color:var(--accent-dark);font-size:12px;">⏰ ${shiftLabel(emp)}</span></span>`;
+          row.innerHTML = `<span>${emp.name} <span style="color:var(--muted);font-size:12px;">(رقم: ${emp.pin||'-'})</span><br><span style="color:var(--accent-dark);font-size:12px;">⏰ ${shiftLabel(emp)} • 🏖️ إجازة: ${offLabel(emp)}</span></span>`;
           const delBtn = document.createElement('button');
           delBtn.className = 'btn-ghost';
           delBtn.style.color = 'var(--danger)';
@@ -857,7 +1025,7 @@ function App(){
           shBtn.style.padding = '6px 12px';
           shBtn.style.fontSize = '12px';
           shBtn.style.marginInlineEnd = '6px';
-          shBtn.textContent = '⏰ الدوام';
+          shBtn.textContent = '⏰ الدوام والإجازة';
           shBtn.onclick = ()=> changeEmployeeShift(emp.name);
           btns.style.flexWrap = 'wrap'; btns.style.gap = '6px'; btns.style.justifyContent = 'flex-end';
           btns.appendChild(shBtn);
@@ -865,6 +1033,30 @@ function App(){
           btns.appendChild(delBtn);
           row.appendChild(btns);
           list.appendChild(row);
+          if(state.editingShift === emp.name){
+            const ed = document.createElement('div');
+            ed.className = 'card';
+            ed.style.background = 'var(--surface-2)';
+            ed.innerHTML = `
+              <b style="font-size:13px;">تعديل دوام ${emp.name}</b>
+              <div style="display:flex;gap:8px;margin-top:8px;">
+                <label style="flex:1;font-size:12px;color:var(--muted);">وقت الدخول<input type="time" id="edit-shift-start" value="${emp.shiftStart}"></label>
+                <label style="flex:1;font-size:12px;color:var(--muted);">وقت الخروج<input type="time" id="edit-shift-end" value="${emp.shiftEnd}"></label>
+              </div>
+              <label style="display:block;font-size:12px;color:var(--muted);">يوم الإجازة الأسبوعية
+                <select class="sel" id="edit-shift-off" style="margin-top:4px;">
+                  <option value="">بدون إجازة</option>
+                  ${DAY_NAMES_AR.map((d,i)=>`<option value="${i}" ${String(i)===emp.dayOff?'selected':''}>${d}</option>`).join('')}
+                </select>
+              </label>
+              <div class="actions-bar">
+                <button class="btn-primary" id="save-shift-btn">حفظ</button>
+                <button class="btn-ghost" id="cancel-shift-btn">إلغاء</button>
+              </div>`;
+            list.appendChild(ed);
+            ed.querySelector('#save-shift-btn').onclick = ()=> saveEmployeeShift(emp.name);
+            ed.querySelector('#cancel-shift-btn').onclick = ()=>{ state.editingShift = null; render(); };
+          }
         });
       }
     } else if(state.adminTab === 'location'){
@@ -1000,12 +1192,12 @@ function App(){
     const name = state.loggedEmployee;
     const myRecs = recordsForMonth(state.currentMonth).filter(r=>r.employee===name).sort((a,b)=>a.date.localeCompare(b.date));
     let totalHours = 0;
-    myRecs.forEach(r=>{ const h = hoursBetween(r.timeIn, r.timeOut); if(h) totalHours += parseFloat(h); });
+    myRecs.forEach(r=>{ const h = netHours(r); if(h !== null) totalHours += h; });
     const myNotifs = state.notifications.filter(n=>n.employee===name);
     const rowsHtml = myRecs.length === 0
       ? `<tr><td colspan="5" style="padding:14px;color:var(--muted);">لا توجد سجلات بهذا الشهر</td></tr>`
       : myRecs.map(r=>`
-          <tr><td>${isoToDisplay(r.date)}</td><td>${r.timeIn||'-'}</td><td>${r.timeOut||'-'}</td><td>${hoursBetween(r.timeIn,r.timeOut)||'-'}</td><td style="font-size:11px;">${notesHtml(r)}</td></tr>
+          <tr><td>${isoToDisplay(r.date)}</td><td>${r.timeIn||'-'}</td><td>${r.timeOut||'-'}</td><td>${fmtH(netHours(r))}</td><td style="font-size:11px;">${notesHtml(r)}</td></tr>
         `).join('');
     app.innerHTML = `
       ${header('مرحبًا ' + name)}
@@ -1016,9 +1208,9 @@ function App(){
         <button class="btn-ghost" id="emp-next-month-btn" style="padding:8px 14px;">▶</button>
       </div>
       <div class="card" style="text-align:center;">
-        <div style="font-size:14px;color:var(--muted);">إجمالي ساعات هذا الشهر</div>
+        <div style="font-size:14px;color:var(--muted);">إجمالي ساعات العمل هذا الشهر</div>
         <div style="font-size:26px;font-weight:900;color:var(--accent);">${totalHours.toFixed(1)} ساعة</div>
-        <div class="totals-line">${myRecs.length} يوم حضور</div>
+        <div class="totals-line">${myRecs.length} يوم حضور — بعد خصم ${state.restHours} ساعة راحة يوميًا</div>
         ${(()=>{ const L=myRecs.reduce((a,r)=>a+lateMins(r),0), E=myRecs.reduce((a,r)=>a+earlyMins(r),0);
           return (L?`<div style="color:var(--danger);font-size:13px;margin-top:6px;">إجمالي التأخير: ${fmtMins(L)}</div>`:'') + (E?`<div style="color:var(--danger);font-size:13px;margin-top:3px;">إجمالي الخروج المبكر: ${fmtMins(E)}</div>`:''); })()}
       </div>
@@ -1032,7 +1224,7 @@ function App(){
         <b style="font-size:14px;">تفاصيل الأيام</b>
         <div class="table-wrap" style="margin-top:10px;">
           <table>
-            <thead><tr><th>التاريخ</th><th>الدخول</th><th>الخروج</th><th>الساعات</th><th>ملاحظات</th></tr></thead>
+            <thead><tr><th>التاريخ</th><th>الدخول</th><th>الخروج</th><th>ساعات العمل</th><th>ملاحظات</th></tr></thead>
             <tbody>${rowsHtml}</tbody>
           </table>
         </div>
