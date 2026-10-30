@@ -47,6 +47,8 @@
   .tag-off{background:#eef3ff;color:#2a5bb0;}
   .tag-in{background:#e9f7ee;color:#1f7a3d;}
   .tag-remote{background:#f3e8ff;color:#6b2fb0;}
+  .tag-admin{background:#fff4d6;color:#8a5a00;}
+  .tag-noloc{background:#e6f4f1;color:#14705f;}
   .back-link{color:var(--accent-dark);font-size:13px;background:none;border:none;padding:6px 0;margin-bottom:10px;text-decoration:underline;cursor:pointer;}
   .msg{font-size:13px;padding:10px 12px;border-radius:10px;margin-bottom:14px;text-align:center;font-weight:700;line-height:1.6;}
   .msg-error{background:#fdecec;color:#b02a2a;border:1px solid #f3bcbc;}
@@ -176,6 +178,7 @@ function normalizeEmployee(e){
            graceEarly: (e.graceEarly === 0 || e.graceEarly) ? String(e.graceEarly) : '',
            token: e.token || '',
            remote: (e.remote === true || e.remote === 'true'), remoteFrom: e.remoteFrom || '',
+           anywhere: (e.anywhere === true || e.anywhere === 'true'),
            remoteSkip: Array.isArray(e.remoteSkip) ? e.remoteSkip : [] };
 }
 // ===== ساعات العمل الصافية (بعد خصم الراحة) + الإجازة الأسبوعية =====
@@ -261,9 +264,85 @@ function notesHtmlCore(rec){
   return parts.join('');
 }
 function isRemoteEmp(emp){ return !!(emp && emp.remote); }
+function escHtml(t){ return String(t==null?'':t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function notesHtml(rec){
-  const tag = rec.remote ? '<div><span class="tag tag-remote">🌐 تبصيم عن بعد</span></div>' : '';
+  let tag = rec.remote ? '<div><span class="tag tag-remote">🌐 تبصيم عن بعد</span></div>' : '';
+  if((rec.inLoc && rec.inLoc.anywhere) || (rec.outLoc && rec.outLoc.anywhere)) tag += '<div><span class="tag tag-noloc">📍 بدون تحديد موقع</span></div>';
+  if(rec.adminIn || rec.adminOut){
+    const what = (rec.adminIn && rec.adminOut) ? 'دخول وخروج' : (rec.adminIn ? 'دخول' : 'خروج');
+    tag += `<div><span class="tag tag-admin">🛡️ بصمة الإدارة: ${what}</span></div>` + (rec.adminNote ? `<div style="font-size:10px;color:var(--muted);">${escHtml(rec.adminNote)}</div>` : '');
+  }
   return tag + notesHtmlCore(rec);
+}
+// ===== تبصيم الإدارة بدلاً عن موظف نسي =====
+function startAdminPunch(name){
+  state.adminPunch = { name, date: state.currentDay };
+  render();
+  setTimeout(()=>{ const c = document.getElementById('punch-card'); if(c && c.scrollIntoView) c.scrollIntoView({ behavior:'smooth' }); }, 50);
+}
+function punchPanelHtml(){
+  const ap = state.adminPunch;
+  if(!ap) return '';
+  const emp = findEmployee(ap.name);
+  if(!emp) return '';
+  const existing = state.records.find(r=>r.employee===ap.name && r.date===ap.date);
+  const isOut = !!existing;
+  const defIn = emp.shiftStart || '12:00', defOut = emp.shiftEnd || '21:00';
+  return `
+    <div class="card no-print" id="punch-card" style="border-color:var(--accent);">
+      <b style="font-size:14px;">🛡️ تبصيم الإدارة بدلاً عن ${escHtml(ap.name)}</b>
+      <div style="font-size:12px;color:var(--muted);margin:4px 0 10px;">${dayNameOf(ap.date)} ${isoToDisplay(ap.date)}${isOut ? ` — دخل ${existing.timeIn} ولم يبصم الخروج` : ''}</div>
+      ${isOut ? '' : `
+        <label style="display:block;font-size:12px;color:var(--muted);">نوع التبصيم
+          <select class="sel" id="ap-mode" style="margin-top:4px;">
+            <option value="both">دخول وخروج</option>
+            <option value="in">دخول فقط (لم ينصرف بعد)</option>
+          </select>
+        </label>`}
+      <div style="display:flex;gap:8px;">
+        ${isOut ? '' : `<label style="flex:1;font-size:12px;color:var(--muted);">وقت الدخول<input type="time" id="ap-in" value="${defIn}"></label>`}
+        <label id="ap-out-wrap" style="flex:1;font-size:12px;color:var(--muted);">وقت الخروج<input type="time" id="ap-out" value="${defOut}"></label>
+      </div>
+      <input type="text" id="ap-note" placeholder="السبب (مثال: نسي التبصيم)">
+      <div class="actions-bar">
+        <button class="btn-primary" id="ap-save">✅ حفظ التبصيم</button>
+        <button class="btn-ghost" id="ap-cancel">إلغاء</button>
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-top:8px;">يظهر في الكشف أنه «بصمة الإدارة» مع السبب، ويراه الموظف أيضًا في صفحته.</div>
+    </div>`;
+}
+async function saveAdminPunch(){
+  const ap = state.adminPunch;
+  if(!ap) return;
+  const emp = findEmployee(ap.name);
+  if(!emp) return;
+  const existing = state.records.find(r=>r.employee===ap.name && r.date===ap.date);
+  const modeEl = document.getElementById('ap-mode');
+  const mode = existing ? 'out' : ((modeEl && modeEl.value) || 'both');
+  const tin = ((document.getElementById('ap-in') || {}).value || '').trim();
+  const tout = ((document.getElementById('ap-out') || {}).value || '').trim();
+  const note = ((document.getElementById('ap-note') || {}).value || '').trim();
+  if(mode === 'out' && !tout){ alert('اكتب وقت الخروج.'); return; }
+  if(mode !== 'out' && !tin){ alert('اكتب وقت الدخول.'); return; }
+  if(mode === 'both' && !tout){ alert('اكتب وقت الخروج.'); return; }
+  let msg = null;
+  const ok = await mutateRecords(records=>{
+    const cur = records.find(r=>r.employee===ap.name && r.date===ap.date);
+    const stamp = new Date().toISOString();
+    if(mode === 'out'){
+      if(!cur || !cur.timeIn || cur.timeOut){ msg = 'لا يوجد دخول مفتوح لهذا الموظف في هذا اليوم.'; return false; }
+      cur.timeOut = tout; cur.adminOut = true; cur.adminAt = stamp;
+      if(note) cur.adminNote = note;
+    } else {
+      if(cur){ msg = 'هذا الموظف له سجل في هذا اليوم. اضغط على الوقت في الجدول لتعديله.'; return false; }
+      records.push({ id: uid(), employee: ap.name, date: ap.date, timeIn: tin, timeOut: mode === 'both' ? tout : null,
+        adminIn: true, adminOut: mode === 'both', adminNote: note, adminAt: stamp,
+        shiftStart: emp.shiftStart || '', shiftEnd: emp.shiftEnd || '' });
+    }
+  });
+  if(!ok){ if(msg) alert(msg); return; }
+  state.adminPunch = null;
+  render();
 }
 function nextISO(iso){
   const [y,m,d] = iso.split('-').map(Number);
@@ -330,7 +409,7 @@ function header(subText){
 let state = {
   loading:true, employees:[], records:[], notifications:[], view:'staff',
   selectedEmployee:null, message:null, busy:false,
-  adminLoggedIn:false, adminPass:'', adminError:null, adminTab:'daily', currentDay: todayISO(), personalToken:'', linkFor:null, linksOnly:false, showAllLinks:false, restHours:2, editingShift:null,
+  adminLoggedIn:false, adminPass:'', adminError:null, adminTab:'daily', currentDay: todayISO(), personalToken:'', linkFor:null, linksOnly:false, showAllLinks:false, adminPunch:null, restHours:2, editingShift:null,
   newEmployeeName:'', newEmployeePin:'', currentMonth: monthKey(todayISO()),
   empLoginName:'', empLoginPin:'', empLoginError:null, loggedEmployee:null,
   notifTargetEmployee:'', notifMessage:'',
@@ -419,7 +498,9 @@ function geoErrorText(err){
   if(err && err.code === -1) return 'هذا الجهاز لا يدعم تحديد الموقع.';
   return 'تعذّر تحديد موقعك. شغّل الـ GPS وحاول مرة ثانية.';
 }
-async function checkInsideRestaurant(){
+async function checkInsideRestaurant(empName){
+  const _em = findEmployee(empName);
+  if(_em && _em.anywhere) return { ok:true, where:{ anywhere:true } }; // موظف يبصم من أي مكان
   // تحديث موقع المطعم من السيرفر قبل كل تبصيمة
   const freshLoc = await settingsGet(LOCATION_KEY);
   if(freshLoc) state.restaurantLoc = freshLoc;
@@ -556,7 +637,7 @@ async function clockIn(empName){
   if(pinErr){ flash('error', pinErr, 4000); return; }
   state.busy = true;
   flash('info', '📍 جارِ التحقق من موقعك...');
-  const check = await checkInsideRestaurant();
+  const check = await checkInsideRestaurant(empName);
   if(!check.ok){ state.busy = false; flash('error', check.text, 6000); return; }
   let rec;
   const ok = await mutateRecords(records=>{
@@ -585,7 +666,7 @@ async function clockOut(empName){
   if(pinErr){ flash('error', pinErr, 4000); return; }
   state.busy = true;
   flash('info', '📍 جارِ التحقق من موقعك...');
-  const check = await checkInsideRestaurant();
+  const check = await checkInsideRestaurant(empName);
   if(!check.ok){ state.busy = false; flash('error', check.text, 6000); return; }
   let timeOut = null, outRec = null;
   const ok = await mutateRecords(records=>{
@@ -616,10 +697,11 @@ async function addEmployee(){
   const shiftEnd = (document.getElementById('new-emp-end')||{}).value || '';
   const dayOff = (document.getElementById('new-emp-off')||{}).value || '';
   const remote = !!(document.getElementById('new-emp-remote')||{}).checked;
+  const anywhere = !!(document.getElementById('new-emp-anywhere')||{}).checked;
   if(!name) return;
   if(remote && (!shiftStart || !shiftEnd)){ alert('الموظف عن بعد لازم تحدد له وقت الدخول ووقت الخروج.'); return; }
   if(state.employees.some(e=>e.name===name)){ alert('هذا الموظف مضاف أصلاً.'); return; }
-  state.employees.push({ name, pin, shiftStart, shiftEnd, dayOff, added: todayISO(), remote, remoteFrom: remote ? todayISO() : '', remoteSkip: [] });
+  state.employees.push({ name, pin, shiftStart, shiftEnd, dayOff, added: todayISO(), remote, remoteFrom: remote ? todayISO() : '', remoteSkip: [], anywhere });
   const ok = await settingsSet(EMPLOYEES_KEY, state.employees);
   if(!ok){ state.employees.pop(); alert('⚠️ لم يتم الحفظ! تأكد من الإنترنت.'); render(); return; }
   state.newEmployeeName = '';
@@ -877,15 +959,17 @@ async function saveEmployeeShift(name){
   const gl = document.getElementById('edit-grace-late').value.trim();
   const ge = document.getElementById('edit-grace-early').value.trim();
   const rm = document.getElementById('edit-shift-remote').checked;
+  const aw = document.getElementById('edit-shift-anywhere').checked;
   if(rm && (!st || !en)){ alert('الموظف عن بعد لازم تحدد له وقت الدخول ووقت الخروج.'); return; }
   if((st && !en) || (!st && en)){ alert('اكتب وقت الدخول ووقت الخروج معًا، أو اتركهما فاضيين.'); return; }
-  const old = { s: emp.shiftStart, e: emp.shiftEnd, o: emp.dayOff, gl: emp.graceLate, ge: emp.graceEarly, rm: emp.remote, rf: emp.remoteFrom };
+  const old = { s: emp.shiftStart, e: emp.shiftEnd, o: emp.dayOff, gl: emp.graceLate, ge: emp.graceEarly, rm: emp.remote, rf: emp.remoteFrom, aw: emp.anywhere };
   emp.shiftStart = st; emp.shiftEnd = en; emp.dayOff = off;
   emp.graceLate = gl === '' ? '' : String(Math.max(0, parseInt(gl,10) || 0));
   emp.graceEarly = ge === '' ? '' : String(Math.max(0, parseInt(ge,10) || 0));
   emp.remote = rm; if(rm && !emp.remoteFrom) emp.remoteFrom = todayISO(); if(!rm) emp.remoteFrom = '';
+  emp.anywhere = aw;
   const ok = await settingsSet(EMPLOYEES_KEY, state.employees);
-  if(!ok){ emp.shiftStart = old.s; emp.shiftEnd = old.e; emp.dayOff = old.o; emp.graceLate = old.gl; emp.graceEarly = old.ge; emp.remote = old.rm; emp.remoteFrom = old.rf; alert('⚠️ لم يتم الحفظ! تأكد من الإنترنت.'); return; }
+  if(!ok){ emp.shiftStart = old.s; emp.shiftEnd = old.e; emp.dayOff = old.o; emp.graceLate = old.gl; emp.graceEarly = old.ge; emp.remote = old.rm; emp.remoteFrom = old.rf; emp.anywhere = old.aw; alert('⚠️ لم يتم الحفظ! تأكد من الإنترنت.'); return; }
   state.editingShift = null;
   if(emp.remote) await syncRemoteRecords();
   render();
@@ -900,6 +984,7 @@ async function saveRestHours(){
   render();
 }
 function shiftDay(delta){
+  state.adminPunch = null;
   const [y,m,d] = state.currentDay.split('-').map(Number);
   const dt = new Date(y, m-1, d+delta);
   state.currentDay = `${dt.getFullYear()}-${pad(dt.getMonth()+1)}-${pad(dt.getDate())}`;
@@ -909,13 +994,16 @@ async function exportArea(areaId, filenameBase){
   const target = document.getElementById(areaId);
   if(!target || typeof html2canvas === 'undefined'){ alert('تعذّر تحميل أداة التصوير.'); return; }
   let canvas;
+  const hid = Array.from(target.querySelectorAll('.no-print'));
+  hid.forEach(el=>{ el.dataset.pd = el.style.display || ''; el.style.display = 'none'; });
   try{
     canvas = await html2canvas(target, {
       backgroundColor:'#ffffff', scale:2, useCORS:true,
       windowWidth: target.scrollWidth, windowHeight: target.scrollHeight,
       width: target.scrollWidth, height: target.scrollHeight
     });
-  }catch(e){ alert('تعذّر إنشاء صورة الكشف.'); return; }
+  }catch(e){ hid.forEach(el=>{ el.style.display = el.dataset.pd || ''; }); alert('تعذّر إنشاء صورة الكشف.'); return; }
+  hid.forEach(el=>{ el.style.display = el.dataset.pd || ''; });
   await shareOrDownloadPdf(canvas, filenameBase);
 }
 function dailyRows(iso){
@@ -1082,7 +1170,7 @@ function App(){
         ${done ? `<p style="color:var(--muted);font-size:14px;">تم تسجيل الدخول والخروج لهذا اليوم<br>(${rec.timeIn} → ${rec.timeOut})</p>` : ''}
         ${canIn ? `<button class="big btn-good" id="clockin-btn" style="margin-bottom:10px;" ${state.busy?'disabled':''}>🟢 تسجيل دخول</button>` : ''}
         ${canOut ? `<button class="big btn-danger" id="clockout-btn" ${state.busy?'disabled':''}>🔴 تسجيل خروج</button>` : ''}
-        ${remoteEmp ? '' : `<p style="color:var(--muted);font-size:12px;margin:12px 0 0;">📍 التبصيم مسموح من داخل المطعم فقط</p>`}
+        ${remoteEmp ? '' : `<p style="color:var(--muted);font-size:12px;margin:12px 0 0;">${emp.anywhere ? '📍 يمكنك التبصيم من أي مكان' : '📍 التبصيم مسموح من داخل المطعم فقط'}</p>`}
       </div>
       ${(!remoteEmp && emp.shiftStart && emp.shiftEnd) ? `
       <div class="card no-print">
@@ -1205,8 +1293,11 @@ function App(){
           <td>${r ? (hoursBetween(r.timeIn,r.timeOut)||'-') : '-'}</td>
           <td style="font-weight:800;">${r ? fmtH(nh) : '-'}</td>
           <td style="font-size:11px;">${note}</td>
+          <td class="no-print">${(()=>{ const e = findEmployee(x.name);
+            const can = e && !isRemoteEmp(e) && iso <= todayISO() && !(r && r.timeIn && r.timeOut);
+            return can ? `<button class="btn-ghost" data-punch="${escHtml(x.name)}" style="padding:6px 8px;font-size:11px;white-space:nowrap;">🛡️ ${r ? 'خروج' : 'تبصيم'}</button>` : ''; })()}</td>
         </tr>`;
-      }).join('') || `<tr><td colspan="6" style="padding:16px;color:var(--muted);">لا يوجد موظفون</td></tr>`;
+      }).join('') || `<tr><td colspan="7" style="padding:16px;color:var(--muted);">لا يوجد موظفون</td></tr>`;
       content.innerHTML = `
         <div class="month-nav no-print">
           <button class="btn-ghost" id="prev-day-btn" style="padding:8px 14px;">◀</button>
@@ -1215,6 +1306,7 @@ function App(){
         </div>
         ${iso !== todayISO() ? `<button class="back-link no-print" id="today-btn" style="display:block;margin:-6px auto 8px;">العودة لليوم</button>` : ''}
         <button class="big btn-ghost no-print" id="add-manual-rec-btn" style="margin-bottom:12px;">+ إضافة / تصحيح سجل يدويًا</button>
+        ${punchPanelHtml()}
         <div id="daily-capture-area" style="background:var(--surface);padding:10px;border-radius:12px;">
           <div style="text-align:center;">
             <img src="${LOGO_URL}" alt="" onerror="this.style.display='none'" style="width:60px;height:60px;border-radius:50%;object-fit:cover;">
@@ -1223,7 +1315,7 @@ function App(){
           </div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>الموظف</th><th>الدخول</th><th>الخروج</th><th>الساعات</th><th>ساعات العمل</th><th>ملاحظات</th></tr></thead>
+              <thead><tr><th>الموظف</th><th>الدخول</th><th>الخروج</th><th>الساعات</th><th>ساعات العمل</th><th>ملاحظات</th><th class="no-print"></th></tr></thead>
               <tbody>${body}</tbody>
             </table>
           </div>
@@ -1242,10 +1334,15 @@ function App(){
       `;
       document.getElementById('prev-day-btn').onclick = ()=> shiftDay(-1);
       document.getElementById('next-day-btn').onclick = ()=> shiftDay(1);
-      const tb = document.getElementById('today-btn'); if(tb) tb.onclick = ()=>{ state.currentDay = todayISO(); render(); };
+      const tb = document.getElementById('today-btn'); if(tb) tb.onclick = ()=>{ state.currentDay = todayISO(); state.adminPunch = null; render(); };
       document.getElementById('add-manual-rec-btn').onclick = addManualRecord;
       document.getElementById('export-daily-btn').onclick = ()=> exportArea('daily-capture-area', 'كشف-يومي-تنوركو-' + iso);
       document.getElementById('print-daily-btn').onclick = ()=> window.print();
+      content.querySelectorAll('[data-punch]').forEach(b=>{ b.onclick = ()=> startAdminPunch(b.dataset.punch); });
+      const _aps = document.getElementById('ap-save'); if(_aps) _aps.onclick = saveAdminPunch;
+      const _apc = document.getElementById('ap-cancel'); if(_apc) _apc.onclick = ()=>{ state.adminPunch = null; render(); };
+      const _apm = document.getElementById('ap-mode');
+      if(_apm) _apm.onchange = ()=>{ const w = document.getElementById('ap-out-wrap'); if(w) w.style.display = (_apm.value === 'in') ? 'none' : 'block'; };
       content.querySelectorAll('[data-edit]').forEach(cell=>{
         cell.onclick = ()=>{ const [recId, field] = cell.dataset.edit.split('|'); editRecordTime(recId, field); };
       });
@@ -1256,8 +1353,8 @@ function App(){
             <tr>
               <td>${isoToDisplay(r.date)}</td>
               <td>${r.employee}${r.manual ? ' <span style="color:var(--muted);font-size:11px;">(يدوي)</span>' : ''}</td>
-              <td style="cursor:pointer;text-decoration:underline;" data-edit="${r.id}|timeIn">${r.timeIn||'-'}${r.inLoc ? `<div style="font-size:10px;color:var(--muted);text-decoration:none;">📍${r.inLoc.dist}م</div>` : ''}</td>
-              <td style="cursor:pointer;text-decoration:underline;" data-edit="${r.id}|timeOut">${r.timeOut||'-'}${r.outLoc ? `<div style="font-size:10px;color:var(--muted);text-decoration:none;">📍${r.outLoc.dist}م</div>` : ''}</td>
+              <td style="cursor:pointer;text-decoration:underline;" data-edit="${r.id}|timeIn">${r.timeIn||'-'}${(r.inLoc && r.inLoc.dist !== undefined) ? `<div style="font-size:10px;color:var(--muted);text-decoration:none;">📍${r.inLoc.dist}م</div>` : ''}</td>
+              <td style="cursor:pointer;text-decoration:underline;" data-edit="${r.id}|timeOut">${r.timeOut||'-'}${(r.outLoc && r.outLoc.dist !== undefined) ? `<div style="font-size:10px;color:var(--muted);text-decoration:none;">📍${r.outLoc.dist}م</div>` : ''}</td>
               <td>${fmtH(netHours(r))}</td>
               <td style="font-size:11px;">${notesHtml(r)}</td>
               <td class="no-print"><button data-del-rec="${r.id}" style="background:none;border:none;color:var(--danger);cursor:pointer;">🗑️</button></td>
@@ -1337,6 +1434,10 @@ function App(){
             <input type="checkbox" id="new-emp-remote" style="width:22px;height:22px;accent-color:var(--accent);flex-shrink:0;">
             <span>🌐 تبصيم عن بعد (تلقائي)<br><span style="font-weight:400;font-size:12px;color:var(--muted);">يُسجَّل دخوله وخروجه تلقائيًا حسب دوامه، ولا يحتاج أن يبصم. يظهر في الكشوفات «تبصيم عن بعد».</span></span>
           </label>
+          <label style="display:flex;align-items:flex-start;gap:10px;font-weight:700;font-size:13px;margin-bottom:12px;">
+            <input type="checkbox" id="new-emp-anywhere" style="width:22px;height:22px;accent-color:var(--accent);flex-shrink:0;">
+            <span>📍 يبصم من أي مكان (بدون موقع)<br><span style="font-weight:400;font-size:12px;color:var(--muted);">للإدارة أو من يعمل خارج المطعم. لا يتحقق الموقع من مكانه، ويظهر في الكشف «بدون تحديد موقع».</span></span>
+          </label>
           <button class="big btn-primary" id="add-emp-btn">إضافة</button>
         </div>
         <div class="card">
@@ -1372,7 +1473,7 @@ function App(){
         state.employees.forEach(emp=>{
           const row = document.createElement('div');
           row.className = 'item-row';
-          row.innerHTML = `<span>${emp.name} <span style="color:var(--muted);font-size:12px;">(رقم: ${emp.pin||'-'})</span><br><span style="color:var(--accent-dark);font-size:12px;">⏰ ${shiftLabel(emp)} • 🏖️ إجازة: ${offLabel(emp)}${emp.remote ? ' • <b style="color:#6b2fb0;">🌐 عن بعد</b>' : ''}</span><br><span style="color:var(--muted);font-size:11px;">⏳ سماح: تأخير ${graceFor(emp.name).late}د • خروج مبكر ${graceFor(emp.name).early}د</span></span>`;
+          row.innerHTML = `<span>${emp.name} <span style="color:var(--muted);font-size:12px;">(رقم: ${emp.pin||'-'})</span><br><span style="color:var(--accent-dark);font-size:12px;">⏰ ${shiftLabel(emp)} • 🏖️ إجازة: ${offLabel(emp)}${emp.remote ? ' • <b style="color:#6b2fb0;">🌐 عن بعد</b>' : ''}${emp.anywhere ? ' • <b style="color:#14705f;">📍 بدون موقع</b>' : ''}</span><br><span style="color:var(--muted);font-size:11px;">⏳ سماح: تأخير ${graceFor(emp.name).late}د • خروج مبكر ${graceFor(emp.name).early}د</span></span>`;
           const delBtn = document.createElement('button');
           delBtn.className = 'btn-ghost';
           delBtn.style.color = 'var(--danger)';
@@ -1450,6 +1551,10 @@ function App(){
               <label style="display:flex;align-items:center;gap:10px;font-weight:700;font-size:13px;margin-bottom:12px;">
                 <input type="checkbox" id="edit-shift-remote" ${emp.remote?'checked':''} style="width:22px;height:22px;accent-color:var(--accent);">
                 🌐 تبصيم عن بعد (تلقائي)
+              </label>
+              <label style="display:flex;align-items:center;gap:10px;font-weight:700;font-size:13px;margin-bottom:12px;">
+                <input type="checkbox" id="edit-shift-anywhere" ${emp.anywhere?'checked':''} style="width:22px;height:22px;accent-color:var(--accent);">
+                📍 يبصم من أي مكان (بدون موقع)
               </label>
               <div class="actions-bar">
                 <button class="btn-primary" id="save-shift-btn">حفظ</button>
