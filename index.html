@@ -81,19 +81,19 @@
 function showFatalError(msg){
   var app = document.getElementById('app');
   if(app && !app.dataset.rendered){
-    app.innerHTML = '<div style="padding:20px;color:#fff;font-family:sans-serif;direction:ltr;text-align:left;">'+
-      '<h2 style="color:#e08a8a;">Loading error</h2>'+
-      '<p style="font-size:13px;word-break:break-word;">'+ msg +'</p>'+
-      '<p style="font-size:12px;color:#a89a89;">Please check your internet connection and reload the page.</p>'+
-    '</div>';
+    app.innerHTML = '<div style="padding:28px 18px;text-align:center;font-family:Tahoma,Arial,sans-serif;">'+
+      '<h2 style="color:#c95a0c;margin:0 0 10px;">تعذّر تحميل الصفحة</h2>'+
+      '<p style="font-size:14px;line-height:1.9;margin:0 0 16px;">تأكد من الإنترنت ثم اضغط إعادة المحاولة.<br>إذا استمرت المشكلة أرسل صورة هذه الشاشة للإدارة.</p>'+
+      '<button onclick="location.reload()" style="padding:13px 26px;border:none;border-radius:10px;background:#e8711a;color:#fff;font-weight:800;font-size:15px;">🔄 إعادة المحاولة</button>'+
+      '<p dir="ltr" style="font-size:11px;color:#8a6a55;word-break:break-word;margin-top:18px;">'+ String(msg).replace(/</g,'&lt;') +'</p></div>';
   }
 }
 window.addEventListener('error', function(e){ showFatalError(e.message || 'Unknown error'); });
 window.addEventListener('unhandledrejection', function(e){ showFatalError('Promise error: ' + (e.reason && e.reason.message ? e.reason.message : e.reason)); });
 </script>
-<script src="https://unpkg.com/@supabase/supabase-js@2.45.4/dist/umd/supabase.js" crossorigin="anonymous"></script>
-<script src="https://unpkg.com/html2canvas@1.4.1/dist/html2canvas.min.js" crossorigin="anonymous"></script>
-<script src="https://unpkg.com/jspdf@2.5.1/dist/jspdf.umd.min.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js" crossorigin="anonymous"></script>
+<script>window.supabase || document.write('<script src="https://unpkg.com/@supabase/supabase-js@2.45.4/dist/umd/supabase.js" crossorigin="anonymous"><\/script>');</script>
+<script>window.supabase || document.write('<script src="https://cdnjs.cloudflare.com/ajax/libs/supabase-js/2.45.4/umd/supabase.min.js"><\/script>');</script>
 <script>
 const SUPABASE_URL = 'https://iekotptltmkjmieauhqc.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_35u5V1apSr2-DCpjp8ltmg_gIJzhXEN';
@@ -113,6 +113,7 @@ const LOGO_URL = 'logo.png';
 const EMPLOYEES_KEY = 'attendance_employees';
 const RECORDS_KEY = 'attendance_records';
 const ADMIN_PASS_KEY = 'attendance_admin_pass';
+const APP_VERSION = 'v11';
 const APP_MODE = 'staff'; // 'staff' = صفحة الموظفين (روابط خاصة فقط) | 'admin' = ملف الإدارة
 const MIN_STAY_MIN = 60; // زر الخروج يظهر بعد ساعة من تسجيل الدخول
 const REMIND_MIN = 5; // المنبه قبل الدخول/الخروج بـ 5 دقائق
@@ -175,6 +176,23 @@ function findEmpByToken(raw){
   const t = String(raw || '').trim().toLowerCase();
   if(t.length < 6) return null;
   return state.employees.find(e => e.token && t.startsWith(String(e.token).toLowerCase())) || null;
+}
+
+function loadFirst(urls, test){
+  return new Promise(function(resolve){
+    var i = 0;
+    (function next(){
+      if(test()){ resolve(true); return; }
+      if(i >= urls.length){ resolve(false); return; }
+      var sc = document.createElement('script');
+      sc.src = urls[i++]; sc.onload = next; sc.onerror = next;
+      document.head.appendChild(sc);
+    })();
+  });
+}
+if(APP_MODE === 'admin'){
+  loadFirst(['https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js','https://unpkg.com/html2canvas@1.4.1/dist/html2canvas.min.js'], function(){ return typeof window.html2canvas !== 'undefined'; });
+  loadFirst(['https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js','https://unpkg.com/jspdf@2.5.1/dist/jspdf.umd.min.js'], function(){ return typeof window.jspdf !== 'undefined'; });
 }
 
 function uid(){ return Date.now().toString(36) + Math.random().toString(36).slice(2,7); }
@@ -305,8 +323,7 @@ function notesHtmlCore(rec){
 function isRemoteEmp(emp){ return !!(emp && emp.remote); }
 function escHtml(t){ return String(t==null?'':t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function notesHtml(rec){
-  let tag = rec.remote ? '<div><span class="tag tag-remote">🌐 تبصيم عن بعد</span></div>' : '';
-  if((rec.inLoc && rec.inLoc.anywhere) || (rec.outLoc && rec.outLoc.anywhere)) tag += '<div><span class="tag tag-noloc">📍 بدون تحديد موقع</span></div>';
+  let tag = ''; // لا يُذكر أي شيء عن طريقة التبصيم (عن بعد / الإدارة / بدون موقع): تظهر كتبصيم عادي
   return tag + notesHtmlCore(rec);
 }
 // ===== تبصيم الإدارة بدلاً عن موظف نسي =====
@@ -549,7 +566,7 @@ function distanceMeters(lat1, lng1, lat2, lng2){
   return Math.round(R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a)));
 }
 function geoErrorText(err){
-  if(err && err.code === 1) return 'لازم تسمح للموقع بالوصول لموقعك (Location) من إعدادات المتصفح ثم تحاول مرة ثانية.';
+  if(err && err.code === 1) return 'لازم تسمح للموقع بالوصول لموقعك (Location) من إعدادات المتصفح ثم تحاول مرة ثانية.<br>وإذا فتحت الرابط من داخل واتساب أو تطبيق آخر، افتحه من Safari أو Chrome.';
   if(err && err.code === 3) return 'تأخر تحديد موقعك. شغّل الـ GPS وحاول مرة ثانية.';
   if(err && err.code === -1) return 'هذا الجهاز لا يدعم تحديد الموقع.';
   return 'تعذّر تحديد موقعك. شغّل الـ GPS وحاول مرة ثانية.';
@@ -902,7 +919,7 @@ async function setRestaurantLocationHere(){
   if(btn){ btn.disabled = true; btn.textContent = 'جارِ تحديد الموقع...'; }
   let pos;
   try{ pos = await getPosition(); }
-  catch(err){ alert(geoErrorText(err)); render(); return; }
+  catch(err){ alert(geoErrorText(err).replace(/<br>/g, '\n')); render(); return; }
   const radiusInput = document.getElementById('loc-radius-input');
   const radius = Math.max(30, parseInt(radiusInput && radiusInput.value, 10) || DEFAULT_RADIUS);
   const loc = { lat:+pos.coords.latitude.toFixed(6), lng:+pos.coords.longitude.toFixed(6), radius };
@@ -963,7 +980,7 @@ async function initPickMap(){
   document.getElementById('map-street-btn').onclick = ()=>{ pickMap.removeLayer(pickLayers.sat); pickLayers.street.addTo(pickMap); };
   document.getElementById('map-me-btn').onclick = async ()=>{
     try{ const pos = await getPosition(); pickMap.setView([pos.coords.latitude, pos.coords.longitude], 18); }
-    catch(err){ alert(geoErrorText(err)); }
+    catch(err){ alert(geoErrorText(err).replace(/<br>/g, '\n')); }
   };
   const ri = document.getElementById('loc-radius-input');
   if(ri) ri.oninput = ()=>{ if(pickCircle) pickCircle.setRadius(currentRadius()); };
@@ -985,7 +1002,7 @@ async function saveMapLocation(){
 async function saveRadiusOnly(){
   if(!state.restaurantLoc){ alert('حدد موقع المطعم أولاً.'); return; }
   const radius = Math.max(30, parseInt(document.getElementById('loc-radius-input').value, 10) || DEFAULT_RADIUS);
-  const loc = { ...state.restaurantLoc, radius };
+  const loc = Object.assign({}, state.restaurantLoc, { radius: radius });
   const ok = await settingsSet(LOCATION_KEY, loc);
   if(!ok){ alert('⚠️ لم يتم الحفظ! تأكد من الإنترنت.'); return; }
   state.restaurantLoc = loc;
@@ -1340,6 +1357,7 @@ function App(){
         ${header('مطعم ومطبخ تنوركو')}
         <div class="msg msg-error">تعذّر الاتصال بالخادم.<br>تأكد من الإنترنت ثم أعد المحاولة.</div>
         <button class="big btn-primary" id="retry-btn">🔄 إعادة المحاولة</button>
+        <div dir="ltr" style="text-align:center;font-size:11px;color:var(--muted);margin-top:10px;">${APP_VERSION}</div>
       </div>`;
     document.getElementById('retry-btn').onclick = ()=> location.reload();
     return;
@@ -1359,6 +1377,7 @@ function App(){
       <div class="center-screen">
         ${header('مطعم ومطبخ تنوركو')}
         <div class="msg msg-error">هذا الرابط غير صحيح أو تم إلغاؤه.<br>اطلب رابطك الخاص من الإدارة.</div>
+        <div dir="ltr" style="text-align:center;font-size:11px;color:var(--muted);margin-top:10px;">رمز: ${escHtml(String(state.personalToken).slice(0,24))} • موظفون: ${state.employees.length} • ${APP_VERSION}</div>
       </div>`;
     return;
   }
@@ -1436,6 +1455,7 @@ function App(){
     if(pinIn) pinIn.oninput = (e)=>{ state.clockPin = e.target.value; };
     const inBtn = document.getElementById('clockin-btn'); if(inBtn) inBtn.onclick = ()=> clockIn(name);
     const outBtn = document.getElementById('clockout-btn'); if(outBtn) outBtn.onclick = ()=> clockOut(name);
+    app.insertAdjacentHTML('beforeend', `<div dir="ltr" style="text-align:center;font-size:10px;color:var(--muted);margin-top:6px;">${APP_VERSION}</div>`);
     const _rb = document.getElementById('add-reminder-btn'); if(_rb) _rb.onclick = downloadReminders;
     startReminderWatch();
     document.getElementById('p-prev-month-btn').onclick = ()=> shiftMonth(-1);
@@ -1487,6 +1507,7 @@ function App(){
       <div class="tabs no-print">
         <div class="tab ${state.adminTab==='daily'?'active':''}" data-tab="daily">📅 اليومي</div>
         <div class="tab ${state.adminTab==='report'?'active':''}" data-tab="report">📋 الشهري</div>
+        <div class="tab ${state.adminTab==='schedule'?'active':''}" data-tab="schedule">🗓️ الدوام والإجازات</div>
         <div class="tab ${state.adminTab==='employees'?'active':''}" data-tab="employees">👥 الموظفين</div>
         <div class="tab ${state.adminTab==='notify'?'active':''}" data-tab="notify">📣 التنبيهات</div>
         <div class="tab ${state.adminTab==='location'?'active':''}" data-tab="location">📍 الحماية</div>
@@ -1579,9 +1600,9 @@ function App(){
         : monthRecs.map(r=>`
             <tr>
               <td>${isoToDisplay(r.date)}</td>
-              <td>${r.employee}${r.manual ? ' <span style="color:var(--muted);font-size:11px;">(يدوي)</span>' : ''}</td>
-              <td style="cursor:pointer;text-decoration:underline;" data-edit="${r.id}|timeIn">${r.timeIn||'-'}${(r.inLoc && r.inLoc.dist !== undefined) ? `<div style="font-size:10px;color:var(--muted);text-decoration:none;">📍${r.inLoc.dist}م</div>` : ''}</td>
-              <td style="cursor:pointer;text-decoration:underline;" data-edit="${r.id}|timeOut">${r.timeOut||'-'}${(r.outLoc && r.outLoc.dist !== undefined) ? `<div style="font-size:10px;color:var(--muted);text-decoration:none;">📍${r.outLoc.dist}م</div>` : ''}</td>
+              <td>${r.employee}</td>
+              <td style="cursor:pointer;text-decoration:underline;" data-edit="${r.id}|timeIn">${r.timeIn||'-'}</td>
+              <td style="cursor:pointer;text-decoration:underline;" data-edit="${r.id}|timeOut">${r.timeOut||'-'}</td>
               <td>${fmtH(netHours(r))}</td>
               <td style="font-size:11px;">${notesHtml(r)}</td>
               <td class="no-print"><button data-del-rec="${r.id}" style="background:none;border:none;color:var(--danger);cursor:pointer;">🗑️</button></td>
@@ -1641,6 +1662,40 @@ function App(){
       content.querySelectorAll('[data-del-rec]').forEach(btn=>{
         btn.onclick = ()=> deleteRecord(btn.dataset.delRec);
       });
+    } else if(state.adminTab === 'schedule'){
+      const emps = state.employees;
+      const rows = emps.map((e,i)=>{
+        const h = shiftHours(e);
+        return `<tr><td>${i+1}</td><td style="font-weight:700;">${escHtml(e.name)}</td><td>${e.shiftStart || '-'}</td><td>${e.shiftEnd || '-'}</td><td>${h !== null ? +h.toFixed(1) : '-'}</td><td>${e.dayOff !== '' ? DAY_NAMES_AR[+e.dayOff] : 'بدون'}</td></tr>`;
+      }).join('') || `<tr><td colspan="6" style="padding:16px;color:var(--muted);">لا يوجد موظفون</td></tr>`;
+      const byOff = {};
+      emps.forEach(e=>{ if(e.dayOff !== ''){ (byOff[String(e.dayOff)] = byOff[String(e.dayOff)] || []).push(e.name); } });
+      const offRows = DAY_NAMES_AR.map((d,i)=> byOff[String(i)] ? `<div class="item-row"><b>${d}</b><span>${byOff[String(i)].map(escHtml).join('، ')}</span></div>` : '').join('');
+      content.innerHTML = `
+        <div id="schedule-capture-area" style="background:var(--surface);padding:10px;border-radius:12px;">
+          <div style="text-align:center;">
+            <img src="${LOGO_URL}" alt="" onerror="this.style.display='none'" style="width:60px;height:60px;border-radius:50%;object-fit:cover;">
+            <h2 style="font-size:16px;margin:6px 0 2px;">جدول الدوام والإجازات الأسبوعية — تنوركو</h2>
+            <div style="font-size:12px;color:var(--muted);margin-bottom:10px;">${dayNameOf(todayISO())} ${isoToDisplay(todayISO())}</div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>#</th><th>الموظف</th><th>بداية الدوام</th><th>نهاية الدوام</th><th>الساعات</th><th>يوم الإجازة</th></tr></thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>
+          <div class="card" style="margin-bottom:0;">
+            <b style="font-size:14px;">🏖️ الإجازات الأسبوعية</b>
+            <div style="margin-top:6px;">${offRows || '<div style="color:var(--muted);font-size:13px;">لا توجد إجازات محددة</div>'}</div>
+          </div>
+        </div>
+        <div class="actions-bar no-print" style="margin-top:14px;">
+          <button class="btn-primary" id="export-schedule-btn">📲 PDF وإرسال واتساب</button>
+          <button class="btn-ghost" id="print-schedule-btn">🖨️ طباعة</button>
+        </div>
+      `;
+      document.getElementById('export-schedule-btn').onclick = ()=> exportArea('schedule-capture-area', 'جدول-الدوام-والاجازات-تنوركو');
+      document.getElementById('print-schedule-btn').onclick = ()=> window.print();
     } else if(state.adminTab === 'employees'){
       content.innerHTML = `
         <div class="card">
