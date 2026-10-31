@@ -6,6 +6,7 @@
 <meta name="theme-color" content="#e8711a">
 <title>إدارة تبصيم تنوركو</title>
 <meta name="robots" content="noindex,nofollow">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <style>
   :root{
     --bg:#fff6ee; --surface:#ffffff; --surface-2:#fff1e4; --line:#f2d2b6;
@@ -140,6 +141,40 @@ async function settingsSet(key, value){
     const { error } = await supabase.from('settings').upsert({ key, value });
     return !error;
   }catch(e){ return false; }
+}
+
+// قراءة صارمة: تفرّق بين «لا يوجد» و«فشل الاتصال» (حتى لا يظهر «الرابط غير صحيح» بسبب ضعف الإنترنت)
+async function settingsGetStrict(key){
+  try{
+    const { data, error } = await supabase.from('settings').select('value').eq('key', key).maybeSingle();
+    if(error) return { ok:false };
+    return { ok:true, value: data ? data.value : null };
+  }catch(e){ return { ok:false }; }
+}
+async function loadStrict(key, tries){
+  for(let i=0; i<(tries||4); i++){
+    const r = await settingsGetStrict(key);
+    if(r.ok) return r;
+    await new Promise(res => setTimeout(res, 500*(i+1)));
+  }
+  return { ok:false };
+}
+// حفظ الموظفين مع الحفاظ على الروابط الموجودة على السيرفر (يمنع ضياع الروابط عند الحفظ من نسخة قديمة)
+async function saveEmployees(){
+  try{
+    const r = await settingsGetStrict(EMPLOYEES_KEY);
+    if(r.ok && Array.isArray(r.value)){
+      const byName = {};
+      r.value.forEach(e=>{ if(e && e.name) byName[e.name] = e; });
+      state.employees.forEach(e=>{ if(!e.token && byName[e.name] && byName[e.name].token) e.token = byName[e.name].token; });
+    }
+  }catch(_){}
+  return settingsSet(EMPLOYEES_KEY, state.employees);
+}
+function findEmpByToken(raw){
+  const t = String(raw || '').trim().toLowerCase();
+  if(t.length < 6) return null;
+  return state.employees.find(e => e.token && t.startsWith(String(e.token).toLowerCase())) || null;
 }
 
 function uid(){ return Date.now().toString(36) + Math.random().toString(36).slice(2,7); }
@@ -428,11 +463,19 @@ let state = {
 let storedAdminPass = DEFAULT_PASS;
 
 async function init(){
-  let emps = await settingsGet(EMPLOYEES_KEY);
+  const re = await loadStrict(EMPLOYEES_KEY);
+  const rr = await loadStrict(RECORDS_KEY);
+  if(!re.ok || !rr.ok){
+    state.loading = false;
+    state.view = 'load-error';
+    render();
+    return;
+  }
+  let emps = re.value;
   if(!Array.isArray(emps)) emps = defaultEmployees();
   state.employees = emps.map(normalizeEmployee);
 
-  let recs = await settingsGet(RECORDS_KEY);
+  let recs = rr.value;
   if(!Array.isArray(recs)) recs = [];
   state.records = recs;
 
@@ -463,8 +506,9 @@ async function init(){
     let tk = null;
     try{ tk = new URLSearchParams(location.search).get('u'); }catch(e){}
     if(tk){
-      state.personalToken = tk;
-      state.view = state.employees.some(e => e.token && e.token === tk) ? 'personal' : 'personal-invalid';
+      const emp = findEmpByToken(tk);
+      if(emp){ state.personalToken = emp.token; state.view = 'personal'; }
+      else { state.personalToken = tk; state.view = 'personal-invalid'; }
     } else {
       state.view = 'no-link';
     }
@@ -740,7 +784,7 @@ async function addEmployee(){
   if(remote && (!shiftStart || !shiftEnd)){ alert('الموظف عن بعد لازم تحدد له وقت الدخول ووقت الخروج.'); return; }
   if(state.employees.some(e=>e.name===name)){ alert('هذا الموظف مضاف أصلاً.'); return; }
   state.employees.push({ name, pin, shiftStart, shiftEnd, dayOff, added: todayISO(), remote, remoteFrom: remote ? todayISO() : '', remoteSkip: [], anywhere });
-  const ok = await settingsSet(EMPLOYEES_KEY, state.employees);
+  const ok = await saveEmployees();
   if(!ok){ state.employees.pop(); alert('⚠️ لم يتم الحفظ! تأكد من الإنترنت.'); render(); return; }
   state.newEmployeeName = '';
   state.newEmployeePin = '';
@@ -750,7 +794,7 @@ async function addEmployee(){
 async function removeEmployee(name){
   if(!confirm(`حذف الموظف "${name}" نهائيًا؟ (سجلاته السابقة تبقى محفوظة)`)) return;
   state.employees = state.employees.filter(e=>e.name!==name);
-  await settingsSet(EMPLOYEES_KEY, state.employees);
+  await saveEmployees();
   render();
 }
 
@@ -786,7 +830,7 @@ async function deleteRecord(recId){
   const _r = state.records.find(r=>r.id===recId);
   if(_r && _r.remote && _r.auto){
     const _e = findEmployee(_r.employee);
-    if(_e){ _e.remoteSkip = (_e.remoteSkip||[]).concat(_r.date); await settingsSet(EMPLOYEES_KEY, state.employees); }
+    if(_e){ _e.remoteSkip = (_e.remoteSkip||[]).concat(_r.date); await saveEmployees(); }
   }
   await mutateRecords(records=>{
     const i = records.findIndex(r=>r.id===recId);
@@ -938,7 +982,7 @@ async function showEmployeeLink(name){
   if(!emp) return;
   if(!emp.token){
     emp.token = newToken();
-    const ok = await settingsSet(EMPLOYEES_KEY, state.employees);
+    const ok = await saveEmployees();
     if(!ok){ emp.token = ''; alert('⚠️ لم يتم الحفظ! تأكد من الإنترنت.'); return; }
   }
   state.linkFor = (state.linkFor === name) ? null : name;
@@ -950,7 +994,7 @@ async function regenLink(name){
   if(!emp) return;
   const old = emp.token;
   emp.token = newToken();
-  const ok = await settingsSet(EMPLOYEES_KEY, state.employees);
+  const ok = await saveEmployees();
   if(!ok){ emp.token = old; alert('⚠️ لم يتم الحفظ! تأكد من الإنترنت.'); return; }
   render();
 }
@@ -968,7 +1012,7 @@ async function ensureAllTokens(){
   let changed = false;
   state.employees.forEach(e=>{ if(!e.token){ e.token = newToken(); changed = true; } });
   if(changed){
-    const ok = await settingsSet(EMPLOYEES_KEY, state.employees);
+    const ok = await saveEmployees();
     if(!ok){ alert('⚠️ لم يتم الحفظ! تأكد من الإنترنت.'); return false; }
   }
   return true;
@@ -1006,7 +1050,7 @@ async function saveEmployeeShift(name){
   emp.graceEarly = ge === '' ? '' : String(Math.max(0, parseInt(ge,10) || 0));
   emp.remote = rm; if(rm && !emp.remoteFrom) emp.remoteFrom = todayISO(); if(!rm) emp.remoteFrom = '';
   emp.anywhere = aw;
-  const ok = await settingsSet(EMPLOYEES_KEY, state.employees);
+  const ok = await saveEmployees();
   if(!ok){ emp.shiftStart = old.s; emp.shiftEnd = old.e; emp.dayOff = old.o; emp.graceLate = old.gl; emp.graceEarly = old.ge; emp.remote = old.rm; emp.remoteFrom = old.rf; emp.anywhere = old.aw; alert('⚠️ لم يتم الحفظ! تأكد من الإنترنت.'); return; }
   state.editingShift = null;
   if(emp.remote) await syncRemoteRecords();
@@ -1070,7 +1114,7 @@ async function changeEmployeePin(name){
   if(!pin){ alert('الرقم السري لا يمكن أن يكون فاضي.'); return; }
   const old = emp.pin;
   emp.pin = pin;
-  const ok = await settingsSet(EMPLOYEES_KEY, state.employees);
+  const ok = await saveEmployees();
   if(!ok){ emp.pin = old; alert('⚠️ لم يتم الحفظ! تأكد من الإنترنت.'); return; }
   alert(`تم تغيير الرقم السري لـ ${name} ✅`);
   render();
@@ -1084,10 +1128,40 @@ async function applyBulkShift(){
   if(!confirm(`تعيين دوام ${st} ← ${en} (${+h.toFixed(1)} ساعة) لجميع الموظفين (${state.employees.length})؟\nروابطهم لن تتغير.`)) return;
   const backup = JSON.parse(JSON.stringify(state.employees));
   state.employees.forEach(e=>{ e.shiftStart = st; e.shiftEnd = en; });
-  const ok = await settingsSet(EMPLOYEES_KEY, state.employees);
+  const ok = await saveEmployees();
   if(!ok){ state.employees = backup; alert('⚠️ لم يتم الحفظ! تأكد من الإنترنت.'); return; }
   await syncRemoteRecords();
   alert('تم تطبيق الدوام على جميع الموظفين ✅');
+  render();
+}
+async function restoreLinksFromText(){
+  const txt = (document.getElementById('restore-links-text') || {}).value || '';
+  const found = [];
+  txt.split(/\r?\n/).forEach(line=>{
+    const m = line.match(/^\s*(.+?)\s*[:：]\s*https?:\/\/\S*?[?&]u=([A-Za-z0-9]+)/);
+    if(m) found.push({ name: m[1].trim(), token: m[2].toLowerCase() });
+  });
+  if(!found.length){ alert('لم أجد روابط بالشكل: الاسم: الرابط'); return; }
+  let restored = 0, same = 0; const missing = [];
+  found.forEach(f=>{
+    const emp = state.employees.find(e => normName(e.name) === normName(f.name));
+    if(!emp){ missing.push(f.name); return; }
+    if(String(emp.token || '').toLowerCase() === f.token) same++;
+    else { emp.token = f.token; restored++; }
+  });
+  if(restored > 0){
+    const ok = await saveEmployees();
+    if(!ok){ alert('⚠️ لم يتم الحفظ! تأكد من الإنترنت.'); return; }
+  }
+  alert(`تمت الاستعادة ✅\nاستُعيد: ${restored}\nسليم أصلًا: ${same}` + (missing.length ? `\nأسماء غير موجودة في الموظفين: ${missing.join('، ')}` : ''));
+  render();
+}
+async function fixMissingLinks(){
+  const missing = state.employees.filter(e=>!e.token).map(e=>e.name);
+  if(!missing.length){ alert('كل الموظفين لهم روابط ✅'); return; }
+  const ok = await ensureAllTokens();
+  if(!ok) return;
+  alert(`تم إنشاء روابط جديدة لـ: ${missing.join('، ')}\nأرسل لهم روابطهم من تبويب 👥 الموظفين.`);
   render();
 }
 function downloadJson(obj, filename){
@@ -1100,31 +1174,34 @@ function downloadJson(obj, filename){
     setTimeout(()=>URL.revokeObjectURL(url), 10000);
   }catch(e){}
 }
-async function resetMonthAttendance(){
+function resetMonthAttendance(){ return resetAttendance('month'); }
+async function resetAttendance(scope){
   const today = todayISO(), mk = monthKey(today);
+  const all = (scope === 'all');
   const latest = await settingsGet(RECORDS_KEY);
   const recs = Array.isArray(latest) ? latest : state.records;
-  const doomed = recs.filter(r => monthKey(r.date) === mk);
-  if(!confirm(`⚠️ سيتم حذف جميع تبصيمات ${monthLabel(mk)} لكل الموظفين (${doomed.length} سجل)، وبدء الاحتساب من اليوم بصفر.\n\nروابط الموظفين لن تتغير.\nتُحفظ نسخة احتياطية قبل الحذف.\n\nهل أنت متأكد؟`)) return;
-  const word = prompt('للتأكيد النهائي اكتب كلمة: تصفير');
-  if(word === null || word.trim() !== 'تصفير'){ alert('تم الإلغاء، لم يُحذف شيء.'); return; }
-  const backup = { month: mk, date: today, records: doomed, prevStart: state.startDate || '' };
+  const doomed = all ? recs.slice() : recs.filter(r => monthKey(r.date) === mk);
+  const what = all ? 'جميع التبصيمات (كل الأشهر)' : `تبصيمات ${monthLabel(mk)}`;
+  if(!confirm(`⚠️ سيتم حذف ${what} لكل الموظفين (${doomed.length} سجل)، وبدء الاحتساب من اليوم بصفر.\n\nروابط الموظفين وبياناتهم لن تتغير.\nتُحفظ نسخة احتياطية قبل الحذف.\n\nهل أنت متأكد؟`)) return;
+  const word = prompt('للتأكيد النهائي اكتب كلمة: ' + (all ? 'حذف' : 'تصفير'));
+  if(word === null || word.trim() !== (all ? 'حذف' : 'تصفير')){ alert('تم الإلغاء، لم يُحذف شيء.'); return; }
+  const backup = { month: all ? 'all' : mk, date: today, records: doomed, prevStart: state.startDate || '' };
   const okB = await settingsSet(RESET_BACKUP_KEY, backup);
-  if(!okB){ alert('⚠️ تعذّر حفظ النسخة الاحتياطية، لذلك لم يتم التصفير.'); return; }
-  downloadJson(backup, `نسخة-تبصيم-${mk}.json`);
-  const kept = recs.filter(r => monthKey(r.date) !== mk);
+  if(!okB){ alert('⚠️ تعذّر حفظ النسخة الاحتياطية، لذلك لم يتم الحذف.'); return; }
+  downloadJson(backup, `نسخة-تبصيم-${all ? 'الكل' : mk}.json`);
+  const kept = all ? [] : recs.filter(r => monthKey(r.date) !== mk);
   const ok = await settingsSet(RECORDS_KEY, kept);
   if(!ok){ alert('⚠️ لم يتم الحفظ! تأكد من الإنترنت.'); return; }
   await settingsSet(START_KEY, today);
   state.records = kept; state.startDate = today;
   await syncRemoteRecords();
-  alert(`تم التصفير ✅ — حُذف ${doomed.length} سجل، والاحتساب يبدأ من اليوم.`);
+  alert(`تم الحذف ✅ — حُذف ${doomed.length} سجل، والاحتساب يبدأ من اليوم.`);
   render();
 }
 async function restoreLastReset(){
   const b = await settingsGet(RESET_BACKUP_KEY);
   if(!b || !Array.isArray(b.records)){ alert('لا توجد نسخة احتياطية.'); return; }
-  if(!confirm(`استرجاع ${b.records.length} سجل من نسخة ${monthLabel(b.month)} (بتاريخ ${isoToDisplay(b.date)})؟`)) return;
+  if(!confirm(`استرجاع ${b.records.length} سجل من نسخة ${b.month === 'all' ? 'كل الأشهر' : monthLabel(b.month)} (بتاريخ ${isoToDisplay(b.date)})؟`)) return;
   const latest = await settingsGet(RECORDS_KEY);
   const recs = Array.isArray(latest) ? latest : state.records;
   const ids = new Set(recs.map(r=>r.id));
@@ -1217,6 +1294,17 @@ function App(){
   app.dataset.rendered = '1';
   if(state.loading){
     app.innerHTML = '<div style="text-align:center;padding:60px 0;">جارِ التحميل...</div>';
+    return;
+  }
+
+  if(state.view === 'load-error'){
+    app.innerHTML = `
+      <div class="center-screen">
+        ${header('مطعم ومطبخ تنوركو')}
+        <div class="msg msg-error">تعذّر الاتصال بالخادم.<br>تأكد من الإنترنت ثم أعد المحاولة.</div>
+        <button class="big btn-primary" id="retry-btn">🔄 إعادة المحاولة</button>
+      </div>`;
+    document.getElementById('retry-btn').onclick = ()=> location.reload();
     return;
   }
 
@@ -1669,6 +1757,16 @@ function App(){
     } else if(state.adminTab === 'tools'){
       content.innerHTML = `
         <div class="card">
+          <b style="font-size:14px;">🔍 فحص الروابط وإصلاحها</b>
+          <div style="margin:8px 0;font-size:13px;">
+            ${state.employees.map(e=>`<div class="item-row"><span>${escHtml(e.name)}</span><span>${e.token ? '<span class="tag tag-in">✅ له رابط</span>' : '<span class="tag tag-abs">❌ بدون رابط</span>'}</span></div>`).join('') || '<div style="color:var(--muted);">لا يوجد موظفون</div>'}
+          </div>
+          <button class="big btn-ghost" id="fix-links-btn" style="margin-bottom:12px;">🔧 إنشاء روابط للناقصين</button>
+          <label style="display:block;font-size:12px;color:var(--muted);margin-bottom:6px;">لاستعادة روابط أُرسلت سابقًا: الصق القائمة بالشكل «الاسم: الرابط» (سطر لكل موظف)</label>
+          <textarea id="restore-links-text" rows="5" style="width:100%;background:var(--surface-2);border:1px solid var(--line);color:var(--text);border-radius:10px;padding:10px;direction:ltr;text-align:left;font-size:12px;font-family:inherit;margin-bottom:8px;"></textarea>
+          <button class="big btn-primary" id="restore-links-btn" style="margin-bottom:0;">↩️ استعادة الروابط من القائمة</button>
+        </div>
+        <div class="card">
           <b style="font-size:14px;">⏰ دوام موحد لجميع الموظفين</b>
           <p style="color:var(--muted);font-size:12.5px;line-height:1.8;margin:6px 0 10px;">يحدد وقت الدخول والخروج لكل الموظفين دفعة واحدة (مثال: 12:00 إلى 00:00 = 12 ساعة). روابط الموظفين لا تتغير، وتقدر تعدّل دوام أي موظف لوحده بعدها.</p>
           <div style="display:flex;gap:8px;">
@@ -1682,6 +1780,7 @@ function App(){
           <b style="font-size:14px;color:var(--danger);">🧹 تصفير الحضور وبدء الشهر بصفر</b>
           <p style="color:var(--muted);font-size:12.5px;line-height:1.8;margin:6px 0 10px;">يحذف تبصيمات <b>${monthLabel(monthKey(todayISO()))}</b> لكل الموظفين، ويبدأ احتساب الحضور والغياب من اليوم. <b>روابط الموظفين وبياناتهم ودوامهم لا تتغير</b>، والأشهر السابقة تبقى كما هي. تُحفظ نسخة احتياطية قبل الحذف.</p>
           <button class="big btn-danger" id="reset-btn" style="margin-bottom:8px;">🧹 تصفير تبصيمات هذا الشهر</button>
+          <button class="big btn-danger" id="reset-all-btn" style="margin-bottom:8px;">🗑️ حذف جميع التبصيمات (كل الأشهر)</button>
           <button class="big btn-ghost" id="restore-btn" style="margin-bottom:0;">↩️ استرجاع آخر نسخة احتياطية</button>
           ${state.startDate ? `<div style="font-size:12px;color:var(--muted);margin-top:8px;text-align:center;">الاحتساب يبدأ من: ${isoToDisplay(state.startDate)}</div>` : ''}
         </div>
@@ -1691,6 +1790,9 @@ function App(){
       _bs.oninput = _bd; _be.oninput = _bd;
       document.getElementById('bulk-shift-btn').onclick = applyBulkShift;
       document.getElementById('reset-btn').onclick = resetMonthAttendance;
+      document.getElementById('reset-all-btn').onclick = ()=> resetAttendance('all');
+      document.getElementById('fix-links-btn').onclick = fixMissingLinks;
+      document.getElementById('restore-links-btn').onclick = restoreLinksFromText;
       document.getElementById('restore-btn').onclick = restoreLastReset;
     } else if(state.adminTab === 'location'){
       const loc = state.restaurantLoc;
