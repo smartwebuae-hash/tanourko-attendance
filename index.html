@@ -6,7 +6,6 @@
 <meta name="theme-color" content="#e8711a">
 <title>تبصيم موظفين تنوركو</title>
 <meta name="robots" content="noindex,nofollow">
-<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <style>
   :root{
     --bg:#fff6ee; --surface:#ffffff; --surface-2:#fff1e4; --line:#f2d2b6;
@@ -115,6 +114,7 @@ const EMPLOYEES_KEY = 'attendance_employees';
 const RECORDS_KEY = 'attendance_records';
 const ADMIN_PASS_KEY = 'attendance_admin_pass';
 const APP_MODE = 'staff'; // 'staff' = صفحة الموظفين (روابط خاصة فقط) | 'admin' = ملف الإدارة
+const MIN_STAY_MIN = 60; // زر الخروج يظهر بعد ساعة من تسجيل الدخول
 const REMIND_MIN = 5; // المنبه قبل الدخول/الخروج بـ 5 دقائق
 const LINKS_ONLY_KEY = 'attendance_links_only'; // التبصيم بالروابط الخاصة فقط
 const START_KEY = 'attendance_start_date'; // بدء احتساب الحضور/الغياب
@@ -454,7 +454,7 @@ function header(subText){
 let state = {
   loading:true, employees:[], records:[], notifications:[], view:'staff',
   selectedEmployee:null, message:null, busy:false,
-  adminLoggedIn:false, adminPass:'', adminError:null, adminTab:'daily', currentDay: todayISO(), personalToken:'', linkFor:null, linksOnly:false, showAllLinks:false, adminPunch:null, restHours:0, startDate:'', editingShift:null,
+  adminLoggedIn:false, adminPass:'', adminError:null, adminTab:'daily', currentDay: todayISO(), personalToken:'', linkFor:null, linksOnly:false, showAllLinks:false, adminPunch:null, lockUntil:0, restHours:0, startDate:'', toolsMsg:null, resetConfirm:null, editingShift:null,
   newEmployeeName:'', newEmployeePin:'', currentMonth: monthKey(todayISO()),
   empLoginName:'', empLoginPin:'', empLoginError:null, loggedEmployee:null,
   notifTargetEmployee:'', notifMessage:'',
@@ -698,9 +698,39 @@ function updateReminderBanner(){
   el.innerHTML = `<div class="msg msg-info" style="font-size:14px;">⏰ ${txt}</div>`;
   if(lastBuzz !== st.type){ lastBuzz = st.type; try{ if(navigator.vibrate) navigator.vibrate([300,150,300]); }catch(e){} }
 }
+let outWaitPrev = 0;
+// يُظهر زر الخروج تلقائيًا عند انتهاء مدة الانتظار (إذا كانت الصفحة مفتوحة)
+function checkOutButtonReady(){
+  if(state.view !== 'personal') return;
+  const emp = state.employees.find(e => e.token && e.token === state.personalToken);
+  if(!emp) return;
+  const rec = todaysRecordFor(emp.name);
+  const w = (rec && rec.timeIn && !rec.timeOut) ? minStayLeft(rec) : 0;
+  if(outWaitPrev > 0 && w === 0){ outWaitPrev = 0; render(); return; }
+  outWaitPrev = w;
+}
 function startReminderWatch(){
   updateReminderBanner();
-  if(!remindTimer) remindTimer = setInterval(updateReminderBanner, 20000);
+  checkOutButtonReady();
+  if(!remindTimer) remindTimer = setInterval(()=>{ updateReminderBanner(); checkOutButtonReady(); }, 10000);
+}
+function addMinsStr(t, mins){
+  const a = toMins(t);
+  if(a === null) return '';
+  const v = (a + mins) % 1440;
+  return `${pad(Math.floor(v/60))}:${pad(v % 60)}`;
+}
+function minStayLeft(rec){
+  if(!rec || !rec.timeIn || !rec.date || MIN_STAY_MIN <= 0) return 0;
+  const a = toMins(rec.timeIn), b = toMins(nowTimeStr());
+  if(a === null || b === null) return 0;
+  const [y,m,d] = rec.date.split('-').map(Number);
+  const [ty,tm,td] = todayISO().split('-').map(Number);
+  const inDt = new Date(y, m-1, d, Math.floor(a/60), a % 60).getTime();
+  const nowDt = new Date(ty, tm-1, td, Math.floor(b/60), b % 60).getTime();
+  const diff = Math.floor((nowDt - inDt) / 60000);
+  if(diff < 0) return 0;
+  return Math.max(0, MIN_STAY_MIN - diff);
 }
 function viaOwnLink(empName){
   const e = findEmployee(empName);
@@ -713,7 +743,7 @@ function checkPin(empName){
   return null;
 }
 async function clockIn(empName){
-  if(state.busy) return;
+  if(state.busy || Date.now() < state.lockUntil) return;
   if(isRemoteEmp(findEmployee(empName))){ flash('info', '🌐 تبصيمك تلقائي عن بعد — لا تحتاج التبصيم.', 4000); return; }
   const pinErr = viaOwnLink(empName) ? null : checkPin(empName);
   if(pinErr){ flash('error', pinErr, 4000); return; }
@@ -733,8 +763,9 @@ async function clockIn(empName){
   if(ok){
     state.selectedEmployee = null;
     state.clockPin = '';
+    state.lockUntil = Date.now() + 2000;
     const lm = lateMins(rec);
-    flash(lm>0?'error':'success', `تم تسجيل دخول ${empName} الساعة ${rec.timeIn}` + (lm>0 ? `<br>⚠️ دخول بعد الوقت ${fmtMins(lm)}` : ''), lm>0?5000:2500);
+    flash(lm>0?'error':'success', `تم تسجيل دخول ${empName} الساعة ${rec.timeIn}` + (lm>0 ? `<br>⚠️ دخول بعد الوقت ${fmtMins(lm)}` : '') + (MIN_STAY_MIN>0 ? `<br>🔴 زر الخروج يظهر الساعة ${addMinsStr(rec.timeIn, MIN_STAY_MIN)}` : ''), 5000);
   } else if(!rec){
     flash('error', 'هذا الموظف مسجل دخول اليوم مسبقًا.', 3000);
   } else {
@@ -742,19 +773,23 @@ async function clockIn(empName){
   }
 }
 async function clockOut(empName){
-  if(state.busy) return;
+  if(state.busy || Date.now() < state.lockUntil) return;
   if(isRemoteEmp(findEmployee(empName))){ flash('info', '🌐 تبصيمك تلقائي عن بعد — لا تحتاج التبصيم.', 4000); return; }
   const pinErr = viaOwnLink(empName) ? null : checkPin(empName);
   if(pinErr){ flash('error', pinErr, 4000); return; }
+  const _pre = todaysRecordFor(empName);
+  const _left = (_pre && _pre.timeIn && !_pre.timeOut) ? minStayLeft(_pre) : 0;
+  if(_left > 0){ flash('error', `سجّلت دخولك الساعة ${_pre.timeIn}.<br>لا يمكن تسجيل الخروج إلا بعد ${fmtMins(_left)} من الدخول.`, 5000); return; }
   state.busy = true;
   flash('info', '📍 جارِ التحقق من موقعك...');
   const check = await checkInsideRestaurant(empName);
   if(!check.ok){ state.busy = false; flash('error', check.text, 6000); return; }
-  let timeOut = null, outRec = null;
+  let timeOut = null, outRec = null, tooSoon = 0;
   const ok = await mutateRecords(records=>{
     const today = todayISO();
     const rec = records.find(r=>r.employee===empName && r.date===today) || openPrevRecord(records, empName);
     if(!rec || rec.timeOut) return false;
+    if(minStayLeft(rec) > 0){ tooSoon = minStayLeft(rec); return false; }
     rec.timeOut = timeOut = nowTimeStr();
     rec.outLoc = check.where;
     outRec = rec;
@@ -763,8 +798,11 @@ async function clockOut(empName){
   if(ok){
     state.selectedEmployee = null;
     state.clockPin = '';
+    state.lockUntil = Date.now() + 2000;
     const em = outRec ? earlyMins(outRec) : 0;
     flash(em>0?'error':'success', `تم تسجيل خروج ${empName} الساعة ${timeOut}` + (em>0 ? `<br>⚠️ خروج قبل الوقت ${fmtMins(em)}` : ''), em>0?5000:2500);
+  } else if(tooSoon){
+    flash('error', `لا يمكن تسجيل الخروج إلا بعد ${fmtMins(tooSoon)} من الدخول.`, 5000);
   } else if(!timeOut){
     flash('error', 'لا يوجد دخول مفتوح لهذا الموظف اليوم.', 3000);
   } else {
@@ -1174,43 +1212,42 @@ function downloadJson(obj, filename){
     setTimeout(()=>URL.revokeObjectURL(url), 10000);
   }catch(e){}
 }
-function resetMonthAttendance(){ return resetAttendance('month'); }
 async function resetAttendance(scope){
   const today = todayISO(), mk = monthKey(today);
   const all = (scope === 'all');
-  const latest = await settingsGet(RECORDS_KEY);
-  const recs = Array.isArray(latest) ? latest : state.records;
+  state.resetConfirm = null;
+  const latest = await loadStrict(RECORDS_KEY);
+  if(!latest.ok){ state.toolsMsg = { type:'error', text:'⚠️ تعذّر الاتصال بالخادم، لم يُحذف شيء. تأكد من الإنترنت وحاول مرة ثانية.' }; render(); return; }
+  const recs = Array.isArray(latest.value) ? latest.value : [];
   const doomed = all ? recs.slice() : recs.filter(r => monthKey(r.date) === mk);
-  const what = all ? 'جميع التبصيمات (كل الأشهر)' : `تبصيمات ${monthLabel(mk)}`;
-  if(!confirm(`⚠️ سيتم حذف ${what} لكل الموظفين (${doomed.length} سجل)، وبدء الاحتساب من اليوم بصفر.\n\nروابط الموظفين وبياناتهم لن تتغير.\nتُحفظ نسخة احتياطية قبل الحذف.\n\nهل أنت متأكد؟`)) return;
-  const word = prompt('للتأكيد النهائي اكتب كلمة: ' + (all ? 'حذف' : 'تصفير'));
-  if(word === null || word.trim() !== (all ? 'حذف' : 'تصفير')){ alert('تم الإلغاء، لم يُحذف شيء.'); return; }
   const backup = { month: all ? 'all' : mk, date: today, records: doomed, prevStart: state.startDate || '' };
   const okB = await settingsSet(RESET_BACKUP_KEY, backup);
-  if(!okB){ alert('⚠️ تعذّر حفظ النسخة الاحتياطية، لذلك لم يتم الحذف.'); return; }
+  if(!okB){ state.toolsMsg = { type:'error', text:'⚠️ تعذّر حفظ النسخة الاحتياطية، لذلك لم يتم الحذف.' }; render(); return; }
   downloadJson(backup, `نسخة-تبصيم-${all ? 'الكل' : mk}.json`);
   const kept = all ? [] : recs.filter(r => monthKey(r.date) !== mk);
   const ok = await settingsSet(RECORDS_KEY, kept);
-  if(!ok){ alert('⚠️ لم يتم الحفظ! تأكد من الإنترنت.'); return; }
+  if(!ok){ state.toolsMsg = { type:'error', text:'⚠️ لم يتم الحذف! تأكد من الإنترنت وحاول مرة ثانية.' }; render(); return; }
   await settingsSet(START_KEY, today);
   state.records = kept; state.startDate = today;
   await syncRemoteRecords();
-  alert(`تم الحذف ✅ — حُذف ${doomed.length} سجل، والاحتساب يبدأ من اليوم.`);
+  const chk = await loadStrict(RECORDS_KEY);
+  const left = (chk.ok && Array.isArray(chk.value)) ? chk.value.length : -1;
+  const hasRemote = state.employees.some(e=>e.remote);
+  state.toolsMsg = { type:'ok', text:`تم الحذف ✅ — حُذف ${doomed.length} سجل. المتبقي الآن: ${left < 0 ? 'غير معروف' : left}.` + (hasRemote ? '<br>(قد يبقى تبصيم اليوم التلقائي لمن تبصيمه عن بعد)' : '') };
   render();
 }
 async function restoreLastReset(){
   const b = await settingsGet(RESET_BACKUP_KEY);
-  if(!b || !Array.isArray(b.records)){ alert('لا توجد نسخة احتياطية.'); return; }
-  if(!confirm(`استرجاع ${b.records.length} سجل من نسخة ${b.month === 'all' ? 'كل الأشهر' : monthLabel(b.month)} (بتاريخ ${isoToDisplay(b.date)})؟`)) return;
+  if(!b || !Array.isArray(b.records)){ state.toolsMsg = { type:'error', text:'لا توجد نسخة احتياطية.' }; render(); return; }
   const latest = await settingsGet(RECORDS_KEY);
   const recs = Array.isArray(latest) ? latest : state.records;
   const ids = new Set(recs.map(r=>r.id));
   const merged = recs.concat(b.records.filter(r=>!ids.has(r.id)));
   const ok = await settingsSet(RECORDS_KEY, merged);
-  if(!ok){ alert('⚠️ لم يتم الحفظ! تأكد من الإنترنت.'); return; }
+  if(!ok){ state.toolsMsg = { type:'error', text:'⚠️ لم يتم الحفظ! تأكد من الإنترنت.' }; render(); return; }
   await settingsSet(START_KEY, b.prevStart || '');
   state.records = merged; state.startDate = b.prevStart || '';
-  alert('تم الاسترجاع ✅');
+  state.toolsMsg = { type:'ok', text:`تم الاسترجاع ✅ — ${b.records.length} سجل (نسخة ${b.month === 'all' ? 'كل الأشهر' : monthLabel(b.month)}).` };
   render();
 }
 function shiftMonth(delta){
@@ -1335,6 +1372,7 @@ function App(){
     const canIn = !remoteEmp && !rec;
     const canOut = !remoteEmp && rec && rec.timeIn && !rec.timeOut;
     const done = !remoteEmp && rec && rec.timeIn && rec.timeOut;
+    const outWait = canOut ? minStayLeft(rec) : 0;
     const myRecs = recordsForMonth(state.currentMonth).filter(r=>r.employee===name).sort((a,b)=>a.date.localeCompare(b.date));
     let totalHours = 0;
     myRecs.forEach(r=>{ const h = netHours(r); if(h !== null) totalHours += h; });
@@ -1353,10 +1391,11 @@ function App(){
         ${emp.shiftStart ? `<div style="color:var(--muted);font-size:13px;margin:-8px 0 12px;">⏰ دوامك: ${shiftLabel(emp)}</div>` : ''}
         ${isOffDay(emp, todayISO()) ? `<div class="msg msg-info">🏖️ اليوم إجازتك الأسبوعية</div>` : ''}
         ${remoteEmp ? `<div class="msg msg-info" style="margin:0;">🌐 تبصيم عن بعد<br>تبصيمك يُسجَّل تلقائيًا، ولا تحتاج أن تبصم.</div>` : ''}
-        ${(rec && rec.date !== todayISO() && !rec.timeOut) ? `<div class="msg msg-info">دخولك سُجّل أمس الساعة ${rec.timeIn} — بصّم الخروج عند انتهاء دوامك.</div>` : ''}
+        ${(!remoteEmp && rec && rec.timeIn && !rec.timeOut) ? `<div class="msg msg-success">✅ تم تسجيل دخولك ${rec.date !== todayISO() ? 'أمس ' : ''}الساعة ${rec.timeIn}<br><span style="font-weight:400;font-size:12px;">بصّم الخروج عند انتهاء دوامك فقط.</span></div>` : ''}
         ${done ? `<p style="color:var(--muted);font-size:14px;">تم تسجيل الدخول والخروج لهذا اليوم<br>(${rec.timeIn} → ${rec.timeOut})</p>` : ''}
         ${canIn ? `<button class="big btn-good" id="clockin-btn" style="margin-bottom:10px;" ${state.busy?'disabled':''}>🟢 تسجيل دخول</button>` : ''}
-        ${canOut ? `<button class="big btn-danger" id="clockout-btn" ${state.busy?'disabled':''}>🔴 تسجيل خروج</button>` : ''}
+        ${(canOut && outWait === 0) ? `<button class="big btn-danger" id="clockout-btn" ${state.busy?'disabled':''}>🔴 تسجيل خروج</button>` : ''}
+        ${(canOut && outWait > 0) ? `<div class="msg msg-info" style="margin:0;">⏳ يظهر زر تسجيل الخروج بعد ${fmtMins(outWait)}<br><span style="font-weight:400;font-size:12px;">الساعة ${addMinsStr(rec.timeIn, MIN_STAY_MIN)}</span></div>` : ''}
         ${remoteEmp ? '' : `<p style="color:var(--muted);font-size:12px;margin:12px 0 0;">${emp.anywhere ? '📍 يمكنك التبصيم من أي مكان' : '📍 التبصيم مسموح من داخل المطعم فقط'}</p>`}
       </div>
       ${(!remoteEmp && emp.shiftStart && emp.shiftEnd) ? `
@@ -1456,7 +1495,7 @@ function App(){
       <div id="admin-content"></div>
     `;
     document.getElementById('admin-logout-btn').onclick = ()=>{ state.adminLoggedIn=false; state.view=(APP_MODE==='admin'?'admin':'staff'); render(); };
-    app.querySelectorAll('.tab').forEach(tb=>{ tb.onclick = ()=>{ state.adminTab = tb.dataset.tab; render(); }; });
+    app.querySelectorAll('.tab').forEach(tb=>{ tb.onclick = ()=>{ state.adminTab = tb.dataset.tab; state.toolsMsg = null; state.resetConfirm = null; render(); }; });
 
     const content = document.getElementById('admin-content');
     if(state.adminTab === 'daily'){
@@ -1776,12 +1815,22 @@ function App(){
           <div id="bulk-dur" style="text-align:center;font-weight:800;color:var(--accent-dark);margin:-4px 0 10px;">المدة: 12 ساعة</div>
           <button class="big btn-primary" id="bulk-shift-btn" style="margin-bottom:0;">تطبيق على جميع الموظفين</button>
         </div>
+        ${state.toolsMsg ? `<div class="msg ${state.toolsMsg.type==='error'?'msg-error':'msg-success'}">${state.toolsMsg.text}</div>` : ''}
         <div class="card" style="border-color:var(--danger);">
-          <b style="font-size:14px;color:var(--danger);">🧹 تصفير الحضور وبدء الشهر بصفر</b>
-          <p style="color:var(--muted);font-size:12.5px;line-height:1.8;margin:6px 0 10px;">يحذف تبصيمات <b>${monthLabel(monthKey(todayISO()))}</b> لكل الموظفين، ويبدأ احتساب الحضور والغياب من اليوم. <b>روابط الموظفين وبياناتهم ودوامهم لا تتغير</b>، والأشهر السابقة تبقى كما هي. تُحفظ نسخة احتياطية قبل الحذف.</p>
-          <button class="big btn-danger" id="reset-btn" style="margin-bottom:8px;">🧹 تصفير تبصيمات هذا الشهر</button>
-          <button class="big btn-danger" id="reset-all-btn" style="margin-bottom:8px;">🗑️ حذف جميع التبصيمات (كل الأشهر)</button>
-          <button class="big btn-ghost" id="restore-btn" style="margin-bottom:0;">↩️ استرجاع آخر نسخة احتياطية</button>
+          <b style="font-size:14px;color:var(--danger);">🗑️ حذف التبصيمات وبدء الاحتساب بصفر</b>
+          <div class="item-row" style="margin-top:8px;"><span>عدد التبصيمات المحفوظة الآن</span><b>${state.records.length}</b></div>
+          <div class="item-row"><span>تبصيمات ${monthLabel(monthKey(todayISO()))}</span><b>${state.records.filter(r=>monthKey(r.date)===monthKey(todayISO())).length}</b></div>
+          ${state.resetConfirm ? `
+            <div class="msg msg-error" style="margin-top:12px;text-align:right;">
+              ⚠️ سيتم حذف ${state.resetConfirm==='all' ? '<b>جميع التبصيمات (كل الأشهر)</b>' : `<b>تبصيمات ${monthLabel(monthKey(todayISO()))}</b>`} لكل الموظفين (${state.resetConfirm==='all' ? state.records.length : state.records.filter(r=>monthKey(r.date)===monthKey(todayISO())).length} سجل) وبدء الاحتساب من اليوم.<br>
+              روابط الموظفين لا تتغير. تُحفظ نسخة احتياطية قبل الحذف.
+            </div>
+            <button class="big btn-danger" id="reset-yes-btn" style="margin-bottom:8px;">✅ نعم، احذف الآن</button>
+            <button class="big btn-ghost" id="reset-no-btn" style="margin-bottom:0;">إلغاء</button>
+          ` : `
+            <button class="big btn-danger" id="reset-btn" style="margin:12px 0 8px;">🧹 تصفير تبصيمات هذا الشهر</button>
+            <button class="big btn-danger" id="reset-all-btn" style="margin-bottom:8px;">🗑️ حذف جميع التبصيمات (كل الأشهر)</button>
+            <button class="big btn-ghost" id="restore-btn" style="margin-bottom:0;">↩️ استرجاع آخر نسخة احتياطية</button>`}
           ${state.startDate ? `<div style="font-size:12px;color:var(--muted);margin-top:8px;text-align:center;">الاحتساب يبدأ من: ${isoToDisplay(state.startDate)}</div>` : ''}
         </div>
       `;
@@ -1789,11 +1838,13 @@ function App(){
       const _bd = ()=>{ const h = shiftHours({ shiftStart:_bs.value, shiftEnd:_be.value }); document.getElementById('bulk-dur').textContent = h === null ? '' : `المدة: ${+h.toFixed(1)} ساعة`; };
       _bs.oninput = _bd; _be.oninput = _bd;
       document.getElementById('bulk-shift-btn').onclick = applyBulkShift;
-      document.getElementById('reset-btn').onclick = resetMonthAttendance;
-      document.getElementById('reset-all-btn').onclick = ()=> resetAttendance('all');
+      const _b1 = document.getElementById('reset-btn'); if(_b1) _b1.onclick = ()=>{ state.resetConfirm = 'month'; state.toolsMsg = null; render(); };
+      const _b2 = document.getElementById('reset-all-btn'); if(_b2) _b2.onclick = ()=>{ state.resetConfirm = 'all'; state.toolsMsg = null; render(); };
+      const _by = document.getElementById('reset-yes-btn'); if(_by) _by.onclick = ()=> resetAttendance(state.resetConfirm);
+      const _bn = document.getElementById('reset-no-btn'); if(_bn) _bn.onclick = ()=>{ state.resetConfirm = null; render(); };
       document.getElementById('fix-links-btn').onclick = fixMissingLinks;
       document.getElementById('restore-links-btn').onclick = restoreLinksFromText;
-      document.getElementById('restore-btn').onclick = restoreLastReset;
+      const _br = document.getElementById('restore-btn'); if(_br) _br.onclick = restoreLastReset;
     } else if(state.adminTab === 'location'){
       const loc = state.restaurantLoc;
       content.innerHTML = `
