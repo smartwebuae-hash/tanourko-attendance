@@ -116,7 +116,9 @@ const ADMIN_PASS_KEY = 'attendance_admin_pass';
 const APP_MODE = 'admin'; // 'staff' = صفحة الموظفين (روابط خاصة فقط) | 'admin' = ملف الإدارة
 const REMIND_MIN = 5; // المنبه قبل الدخول/الخروج بـ 5 دقائق
 const LINKS_ONLY_KEY = 'attendance_links_only'; // التبصيم بالروابط الخاصة فقط
-const REST_KEY = 'attendance_rest_hours'; // ساعات الراحة التي تُخصم يوميًا
+const START_KEY = 'attendance_start_date'; // بدء احتساب الحضور/الغياب
+const RESET_BACKUP_KEY = 'attendance_reset_backup';
+const REST_KEY = 'attendance_rest_hours_v2'; // ساعات الراحة التي تُخصم يوميًا
 const DAY_NAMES_AR = ['الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];
 const NOTIFICATIONS_KEY = 'attendance_notifications';
 const LOCATION_KEY = 'attendance_location'; // جديد: موقع المطعم المسموح التبصيم منه
@@ -182,6 +184,7 @@ function normalizeEmployee(e){
            remoteSkip: Array.isArray(e.remoteSkip) ? e.remoteSkip : [] };
 }
 // ===== ساعات العمل الصافية (بعد خصم الراحة) + الإجازة الأسبوعية =====
+function restNote(){ return state.restHours > 0 ? ` — بعد خصم ${state.restHours} ساعة راحة يوميًا` : ''; }
 function netHours(rec){
   const g = hoursBetween(rec.timeIn, rec.timeOut);
   if(g === null) return null;
@@ -193,9 +196,10 @@ function dayNameOf(iso){ return DAY_NAMES_AR[weekdayOf(iso)]; }
 function isOffDay(emp, iso){ return !!emp && emp.dayOff !== '' && String(weekdayOf(iso)) === String(emp.dayOff); }
 function offLabel(emp){ return emp.dayOff !== '' ? DAY_NAMES_AR[+emp.dayOff] : 'بدون'; }
 function empStartDate(emp){
-  if(emp.added) return emp.added;
-  const ds = state.records.filter(r=>r.employee===emp.name).map(r=>r.date).sort();
-  return ds[0] || null;
+  let d = emp.added || null;
+  if(!d){ const ds = state.records.filter(r=>r.employee===emp.name).map(r=>r.date).sort(); d = ds[0] || null; }
+  if(state.startDate && (!d || d < state.startDate)) d = state.startDate;
+  return d;
 }
 function monthStats(emp, mKey){
   const [y,m] = mKey.split('-').map(Number);
@@ -268,10 +272,6 @@ function escHtml(t){ return String(t==null?'':t).replace(/&/g,'&amp;').replace(/
 function notesHtml(rec){
   let tag = rec.remote ? '<div><span class="tag tag-remote">🌐 تبصيم عن بعد</span></div>' : '';
   if((rec.inLoc && rec.inLoc.anywhere) || (rec.outLoc && rec.outLoc.anywhere)) tag += '<div><span class="tag tag-noloc">📍 بدون تحديد موقع</span></div>';
-  if(rec.adminIn || rec.adminOut){
-    const what = (rec.adminIn && rec.adminOut) ? 'دخول وخروج' : (rec.adminIn ? 'دخول' : 'خروج');
-    tag += `<div><span class="tag tag-admin">🛡️ بصمة الإدارة: ${what}</span></div>` + (rec.adminNote ? `<div style="font-size:10px;color:var(--muted);">${escHtml(rec.adminNote)}</div>` : '');
-  }
   return tag + notesHtmlCore(rec);
 }
 // ===== تبصيم الإدارة بدلاً عن موظف نسي =====
@@ -308,7 +308,7 @@ function punchPanelHtml(){
         <button class="btn-primary" id="ap-save">✅ حفظ التبصيم</button>
         <button class="btn-ghost" id="ap-cancel">إلغاء</button>
       </div>
-      <div style="font-size:11px;color:var(--muted);margin-top:8px;">يظهر في الكشف أنه «بصمة الإدارة» مع السبب، ويراه الموظف أيضًا في صفحته.</div>
+      <div style="font-size:11px;color:var(--muted);margin-top:8px;">يُسجَّل كتبصيم عادي في الكشف. (يُحفظ السبب داخليًا فقط)</div>
     </div>`;
 }
 async function saveAdminPunch(){
@@ -359,6 +359,7 @@ function applyRemote(records){
     if(startM === null || endM === null) return;
     const overnight = endM <= startM;
     let iso = emp.remoteFrom || emp.added || today;
+    if(state.startDate && iso < state.startDate) iso = state.startDate;
     let guard = 0;
     while(iso <= today && guard++ < 400){
       const isToday = (iso === today);
@@ -392,7 +393,16 @@ async function syncRemoteRecords(){
     state.records = recs;
   }
 }
-function shiftLabel(emp){ return (emp.shiftStart && emp.shiftEnd) ? `${emp.shiftStart} ← ${emp.shiftEnd}` : 'بدون دوام محدد'; }
+function shiftHours(emp){
+  const a = toMins(emp.shiftStart), b = toMins(emp.shiftEnd);
+  if(a === null || b === null) return null;
+  let m = b - a; if(m <= 0) m += 1440;
+  return m / 60;
+}
+function shiftLabel(emp){
+  const h = shiftHours(emp);
+  return (emp.shiftStart && emp.shiftEnd) ? `${emp.shiftStart} ← ${emp.shiftEnd}${h !== null ? ` (${+h.toFixed(1)} ساعة)` : ''}` : 'بدون دوام محدد';
+}
 function findEmployee(name){ return state.employees.find(e=>e.name===name) || null; }
 
 // ===== رأس الصفحة: الشعار + الاسم =====
@@ -409,7 +419,7 @@ function header(subText){
 let state = {
   loading:true, employees:[], records:[], notifications:[], view:'staff',
   selectedEmployee:null, message:null, busy:false,
-  adminLoggedIn:false, adminPass:'', adminError:null, adminTab:'daily', currentDay: todayISO(), personalToken:'', linkFor:null, linksOnly:false, showAllLinks:false, adminPunch:null, restHours:2, editingShift:null,
+  adminLoggedIn:false, adminPass:'', adminError:null, adminTab:'daily', currentDay: todayISO(), personalToken:'', linkFor:null, linksOnly:false, showAllLinks:false, adminPunch:null, restHours:0, startDate:'', editingShift:null,
   newEmployeeName:'', newEmployeePin:'', currentMonth: monthKey(todayISO()),
   empLoginName:'', empLoginPin:'', empLoginError:null, loggedEmployee:null,
   notifTargetEmployee:'', notifMessage:'',
@@ -439,6 +449,8 @@ async function init(){
   state.restaurantLoc = await settingsGet(LOCATION_KEY);
   const rh = await settingsGet(REST_KEY);
   if(rh !== null && rh !== undefined && !isNaN(parseFloat(rh))) state.restHours = parseFloat(rh);
+  const sdv = await settingsGet(START_KEY);
+  if(typeof sdv === 'string') state.startDate = sdv;
 
   await syncRemoteRecords();
   const lo = await settingsGet(LINKS_ONLY_KEY);
@@ -523,9 +535,35 @@ async function checkInsideRestaurant(empName){
   return { ok:true, where:{ lat:+latitude.toFixed(6), lng:+longitude.toFixed(6), dist, acc:Math.round(accuracy) } };
 }
 
+function prevISO(iso){
+  const [y,m,d] = iso.split('-').map(Number);
+  const dt = new Date(y, m-1, d-1);
+  return `${dt.getFullYear()}-${pad(dt.getMonth()+1)}-${pad(dt.getDate())}`;
+}
+// سجل دخول مفتوح من أمس (دوام يتجاوز منتصف الليل) — ما زال صالحًا لتبصيم الخروج
+function openPrevRecord(records, empName){
+  const today = todayISO();
+  const prev = records.find(r => r.employee === empName && r.date === prevISO(today) && r.timeIn && !r.timeOut);
+  if(!prev) return null;
+  const inM = toMins(prev.timeIn), nowM = toMins(nowTimeStr());
+  if(inM === null || nowM === null) return null;
+  const [y,m,d] = prev.date.split('-').map(Number);
+  const [ty,tm,td] = today.split('-').map(Number);
+  const nowDt = new Date(ty, tm-1, td, Math.floor(nowM/60), nowM % 60);
+  const sh = shiftOf(prev);
+  const sM = toMins(sh.start), eM = toMins(sh.end);
+  let limit;
+  if(sM !== null && eM !== null){
+    // نهاية الدوام + 4 ساعات سماح
+    limit = new Date(y, m-1, d + (eM <= sM ? 1 : 0), Math.floor(eM/60), eM % 60).getTime() + 4*3600000;
+  } else {
+    limit = new Date(y, m-1, d, Math.floor(inM/60), inM % 60).getTime() + 14*3600000;
+  }
+  return nowDt.getTime() <= limit ? prev : null;
+}
 function todaysRecordFor(empName){
   const today = todayISO();
-  return state.records.find(r => r.employee === empName && r.date === today) || null;
+  return state.records.find(r => r.employee === empName && r.date === today) || openPrevRecord(state.records, empName);
 }
 function statusFor(empName){
   if(isRemoteEmp(findEmployee(empName))) return { label:'🌐 تبصيم عن بعد', cls:'status-in' };
@@ -598,9 +636,9 @@ function reminderState(emp){
   if(!rec){
     const d = sM - nowM;
     if(d >= 0 && d <= REMIND_MIN) return { type:'in', mins:d };
-  } else if(rec.timeIn && !rec.timeOut && eM > sM){
-    const d = eM - nowM;
-    if(d >= 0 && d <= REMIND_MIN) return { type:'out', mins:d };
+  } else if(rec.timeIn && !rec.timeOut){
+    const d = (eM - nowM + 1440) % 1440;
+    if(d <= REMIND_MIN) return { type:'out', mins:d };
   }
   return null;
 }
@@ -642,7 +680,7 @@ async function clockIn(empName){
   let rec;
   const ok = await mutateRecords(records=>{
     const today = todayISO();
-    if(records.some(r=>r.employee===empName && r.date===today)) return false; // مسجل مسبقًا
+    if(records.some(r=>r.employee===empName && r.date===today) || openPrevRecord(records, empName)) return false; // مسجل مسبقًا
     const emp = findEmployee(empName) || {};
     rec = { id: uid(), employee: empName, date: today, timeIn: nowTimeStr(), timeOut: null, inLoc: check.where, shiftStart: emp.shiftStart || '', shiftEnd: emp.shiftEnd || '' };
     records.push(rec);
@@ -671,7 +709,7 @@ async function clockOut(empName){
   let timeOut = null, outRec = null;
   const ok = await mutateRecords(records=>{
     const today = todayISO();
-    const rec = records.find(r=>r.employee===empName && r.date===today);
+    const rec = records.find(r=>r.employee===empName && r.date===today) || openPrevRecord(records, empName);
     if(!rec || rec.timeOut) return false;
     rec.timeOut = timeOut = nowTimeStr();
     rec.outLoc = check.where;
@@ -980,7 +1018,7 @@ async function saveRestHours(){
   const ok = await settingsSet(REST_KEY, v);
   if(!ok){ alert('⚠️ لم يتم الحفظ! تأكد من الإنترنت.'); return; }
   state.restHours = v;
-  alert(`تم الحفظ ✅ — يُخصم ${v} ساعة راحة من كل يوم عمل لكل موظف.`);
+  alert(v > 0 ? `تم الحفظ ✅ — يُخصم ${v} ساعة راحة من كل يوم عمل لكل موظف.` : 'تم الحفظ ✅ — لا يُخصم أي وقت راحة.');
   render();
 }
 function shiftDay(delta){
@@ -1038,6 +1076,66 @@ async function changeEmployeePin(name){
   render();
 }
 
+async function applyBulkShift(){
+  const st = (document.getElementById('bulk-start') || {}).value || '';
+  const en = (document.getElementById('bulk-end') || {}).value || '';
+  if(!st || !en){ alert('اكتب وقت الدخول ووقت الخروج.'); return; }
+  const h = shiftHours({ shiftStart:st, shiftEnd:en });
+  if(!confirm(`تعيين دوام ${st} ← ${en} (${+h.toFixed(1)} ساعة) لجميع الموظفين (${state.employees.length})؟\nروابطهم لن تتغير.`)) return;
+  const backup = JSON.parse(JSON.stringify(state.employees));
+  state.employees.forEach(e=>{ e.shiftStart = st; e.shiftEnd = en; });
+  const ok = await settingsSet(EMPLOYEES_KEY, state.employees);
+  if(!ok){ state.employees = backup; alert('⚠️ لم يتم الحفظ! تأكد من الإنترنت.'); return; }
+  await syncRemoteRecords();
+  alert('تم تطبيق الدوام على جميع الموظفين ✅');
+  render();
+}
+function downloadJson(obj, filename){
+  try{
+    const blob = new Blob([JSON.stringify(obj, null, 1)], { type:'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(()=>URL.revokeObjectURL(url), 10000);
+  }catch(e){}
+}
+async function resetMonthAttendance(){
+  const today = todayISO(), mk = monthKey(today);
+  const latest = await settingsGet(RECORDS_KEY);
+  const recs = Array.isArray(latest) ? latest : state.records;
+  const doomed = recs.filter(r => monthKey(r.date) === mk);
+  if(!confirm(`⚠️ سيتم حذف جميع تبصيمات ${monthLabel(mk)} لكل الموظفين (${doomed.length} سجل)، وبدء الاحتساب من اليوم بصفر.\n\nروابط الموظفين لن تتغير.\nتُحفظ نسخة احتياطية قبل الحذف.\n\nهل أنت متأكد؟`)) return;
+  const word = prompt('للتأكيد النهائي اكتب كلمة: تصفير');
+  if(word === null || word.trim() !== 'تصفير'){ alert('تم الإلغاء، لم يُحذف شيء.'); return; }
+  const backup = { month: mk, date: today, records: doomed, prevStart: state.startDate || '' };
+  const okB = await settingsSet(RESET_BACKUP_KEY, backup);
+  if(!okB){ alert('⚠️ تعذّر حفظ النسخة الاحتياطية، لذلك لم يتم التصفير.'); return; }
+  downloadJson(backup, `نسخة-تبصيم-${mk}.json`);
+  const kept = recs.filter(r => monthKey(r.date) !== mk);
+  const ok = await settingsSet(RECORDS_KEY, kept);
+  if(!ok){ alert('⚠️ لم يتم الحفظ! تأكد من الإنترنت.'); return; }
+  await settingsSet(START_KEY, today);
+  state.records = kept; state.startDate = today;
+  await syncRemoteRecords();
+  alert(`تم التصفير ✅ — حُذف ${doomed.length} سجل، والاحتساب يبدأ من اليوم.`);
+  render();
+}
+async function restoreLastReset(){
+  const b = await settingsGet(RESET_BACKUP_KEY);
+  if(!b || !Array.isArray(b.records)){ alert('لا توجد نسخة احتياطية.'); return; }
+  if(!confirm(`استرجاع ${b.records.length} سجل من نسخة ${monthLabel(b.month)} (بتاريخ ${isoToDisplay(b.date)})؟`)) return;
+  const latest = await settingsGet(RECORDS_KEY);
+  const recs = Array.isArray(latest) ? latest : state.records;
+  const ids = new Set(recs.map(r=>r.id));
+  const merged = recs.concat(b.records.filter(r=>!ids.has(r.id)));
+  const ok = await settingsSet(RECORDS_KEY, merged);
+  if(!ok){ alert('⚠️ لم يتم الحفظ! تأكد من الإنترنت.'); return; }
+  await settingsSet(START_KEY, b.prevStart || '');
+  state.records = merged; state.startDate = b.prevStart || '';
+  alert('تم الاسترجاع ✅');
+  render();
+}
 function shiftMonth(delta){
   const [y,m] = state.currentMonth.split('-').map(Number);
   const d = new Date(y, m-1+delta, 1);
@@ -1167,6 +1265,7 @@ function App(){
         ${emp.shiftStart ? `<div style="color:var(--muted);font-size:13px;margin:-8px 0 12px;">⏰ دوامك: ${shiftLabel(emp)}</div>` : ''}
         ${isOffDay(emp, todayISO()) ? `<div class="msg msg-info">🏖️ اليوم إجازتك الأسبوعية</div>` : ''}
         ${remoteEmp ? `<div class="msg msg-info" style="margin:0;">🌐 تبصيم عن بعد<br>تبصيمك يُسجَّل تلقائيًا، ولا تحتاج أن تبصم.</div>` : ''}
+        ${(rec && rec.date !== todayISO() && !rec.timeOut) ? `<div class="msg msg-info">دخولك سُجّل أمس الساعة ${rec.timeIn} — بصّم الخروج عند انتهاء دوامك.</div>` : ''}
         ${done ? `<p style="color:var(--muted);font-size:14px;">تم تسجيل الدخول والخروج لهذا اليوم<br>(${rec.timeIn} → ${rec.timeOut})</p>` : ''}
         ${canIn ? `<button class="big btn-good" id="clockin-btn" style="margin-bottom:10px;" ${state.busy?'disabled':''}>🟢 تسجيل دخول</button>` : ''}
         ${canOut ? `<button class="big btn-danger" id="clockout-btn" ${state.busy?'disabled':''}>🔴 تسجيل خروج</button>` : ''}
@@ -1186,7 +1285,7 @@ function App(){
       <div class="card" style="text-align:center;">
         <div style="font-size:14px;color:var(--muted);">إجمالي ساعات العمل هذا الشهر</div>
         <div style="font-size:26px;font-weight:900;color:var(--accent);">${totalHours.toFixed(1)} ساعة</div>
-        <div class="totals-line">${myRecs.length} يوم حضور — بعد خصم ${state.restHours} ساعة راحة يوميًا</div>
+        <div class="totals-line">${myRecs.length} يوم حضور${restNote()}</div>
         <div style="font-size:12px;margin-top:6px;">${ms.absent>0?`<span class="tag tag-abs">غياب ${ms.absent} يوم</span> `:''}<span class="tag tag-off">إجازة ${ms.off} يوم (${offLabel(emp)})</span></div>
         ${(()=>{ const L=myRecs.reduce((a,r)=>a+lateMins(r),0), E=myRecs.reduce((a,r)=>a+earlyMins(r),0);
           return (L?`<div style="color:var(--danger);font-size:13px;margin-top:6px;">إجمالي التأخير: ${fmtMins(L)}</div>`:'') + (E?`<div style="color:var(--danger);font-size:13px;margin-top:3px;">إجمالي الخروج المبكر: ${fmtMins(E)}</div>`:''); })()}
@@ -1264,6 +1363,7 @@ function App(){
         <div class="tab ${state.adminTab==='employees'?'active':''}" data-tab="employees">👥 الموظفين</div>
         <div class="tab ${state.adminTab==='notify'?'active':''}" data-tab="notify">📣 التنبيهات</div>
         <div class="tab ${state.adminTab==='location'?'active':''}" data-tab="location">📍 الحماية</div>
+        <div class="tab ${state.adminTab==='tools'?'active':''}" data-tab="tools">🧰 أدوات</div>
       </div>
       <div id="admin-content"></div>
     `;
@@ -1324,7 +1424,7 @@ function App(){
             <div class="item-row"><span>❌ غائب</span><b>${cAbsent}</b></div>
             <div class="item-row"><span>🏖️ إجازة أسبوعية</span><b>${cOff}</b></div>
             <div class="item-row"><span>⏱️ مجموع ساعات العمل</span><b>${sumH.toFixed(1)} ساعة</b></div>
-            <div style="font-size:11px;color:var(--muted);margin-top:6px;">«ساعات العمل» = الساعات بعد خصم ${state.restHours} ساعة راحة لكل موظف.</div>
+            <div style="font-size:11px;color:var(--muted);margin-top:6px;">${state.restHours > 0 ? `«ساعات العمل» = الساعات بعد خصم ${state.restHours} ساعة راحة لكل موظف.` : '«ساعات العمل» = من وقت الدخول إلى وقت الخروج.'}</div>
           </div>
         </div>
         <div class="actions-bar no-print" style="margin-top:14px;">
@@ -1363,7 +1463,7 @@ function App(){
       const totalsHtml = Object.keys(totalsByEmployee).length === 0 ? '' : `
         <div class="card">
           <b style="font-size:14px;">إجمالي الشهر لكل موظف</b>
-          <div style="font-size:11px;color:var(--muted);margin-top:2px;">ساعات العمل بعد خصم ${state.restHours} ساعة راحة يوميًا</div>
+          <div style="font-size:11px;color:var(--muted);margin-top:2px;">${state.restHours > 0 ? `ساعات العمل بعد خصم ${state.restHours} ساعة راحة يوميًا` : 'ساعات العمل = من الدخول إلى الخروج (بدون خصم راحة)'}</div>
           ${Object.entries(totalsByEmployee).map(([name,t])=>`
             <div class="item-row" style="display:block;">
               <div style="display:flex;justify-content:space-between;"><b>${name}</b><span>${t.days} يوم — ${t.hours.toFixed(1)} ساعة عمل</span></div>
@@ -1566,6 +1666,32 @@ function App(){
           }
         });
       }
+    } else if(state.adminTab === 'tools'){
+      content.innerHTML = `
+        <div class="card">
+          <b style="font-size:14px;">⏰ دوام موحد لجميع الموظفين</b>
+          <p style="color:var(--muted);font-size:12.5px;line-height:1.8;margin:6px 0 10px;">يحدد وقت الدخول والخروج لكل الموظفين دفعة واحدة (مثال: 12:00 إلى 00:00 = 12 ساعة). روابط الموظفين لا تتغير، وتقدر تعدّل دوام أي موظف لوحده بعدها.</p>
+          <div style="display:flex;gap:8px;">
+            <label style="flex:1;font-size:12px;color:var(--muted);">وقت الدخول<input type="time" id="bulk-start" value="12:00"></label>
+            <label style="flex:1;font-size:12px;color:var(--muted);">وقت الخروج<input type="time" id="bulk-end" value="00:00"></label>
+          </div>
+          <div id="bulk-dur" style="text-align:center;font-weight:800;color:var(--accent-dark);margin:-4px 0 10px;">المدة: 12 ساعة</div>
+          <button class="big btn-primary" id="bulk-shift-btn" style="margin-bottom:0;">تطبيق على جميع الموظفين</button>
+        </div>
+        <div class="card" style="border-color:var(--danger);">
+          <b style="font-size:14px;color:var(--danger);">🧹 تصفير الحضور وبدء الشهر بصفر</b>
+          <p style="color:var(--muted);font-size:12.5px;line-height:1.8;margin:6px 0 10px;">يحذف تبصيمات <b>${monthLabel(monthKey(todayISO()))}</b> لكل الموظفين، ويبدأ احتساب الحضور والغياب من اليوم. <b>روابط الموظفين وبياناتهم ودوامهم لا تتغير</b>، والأشهر السابقة تبقى كما هي. تُحفظ نسخة احتياطية قبل الحذف.</p>
+          <button class="big btn-danger" id="reset-btn" style="margin-bottom:8px;">🧹 تصفير تبصيمات هذا الشهر</button>
+          <button class="big btn-ghost" id="restore-btn" style="margin-bottom:0;">↩️ استرجاع آخر نسخة احتياطية</button>
+          ${state.startDate ? `<div style="font-size:12px;color:var(--muted);margin-top:8px;text-align:center;">الاحتساب يبدأ من: ${isoToDisplay(state.startDate)}</div>` : ''}
+        </div>
+      `;
+      const _bs = document.getElementById('bulk-start'), _be = document.getElementById('bulk-end');
+      const _bd = ()=>{ const h = shiftHours({ shiftStart:_bs.value, shiftEnd:_be.value }); document.getElementById('bulk-dur').textContent = h === null ? '' : `المدة: ${+h.toFixed(1)} ساعة`; };
+      _bs.oninput = _bd; _be.oninput = _bd;
+      document.getElementById('bulk-shift-btn').onclick = applyBulkShift;
+      document.getElementById('reset-btn').onclick = resetMonthAttendance;
+      document.getElementById('restore-btn').onclick = restoreLastReset;
     } else if(state.adminTab === 'location'){
       const loc = state.restaurantLoc;
       content.innerHTML = `
@@ -1717,7 +1843,7 @@ function App(){
       <div class="card" style="text-align:center;">
         <div style="font-size:14px;color:var(--muted);">إجمالي ساعات العمل هذا الشهر</div>
         <div style="font-size:26px;font-weight:900;color:var(--accent);">${totalHours.toFixed(1)} ساعة</div>
-        <div class="totals-line">${myRecs.length} يوم حضور — بعد خصم ${state.restHours} ساعة راحة يوميًا</div>
+        <div class="totals-line">${myRecs.length} يوم حضور${restNote()}</div>
         ${(()=>{ const L=myRecs.reduce((a,r)=>a+lateMins(r),0), E=myRecs.reduce((a,r)=>a+earlyMins(r),0);
           return (L?`<div style="color:var(--danger);font-size:13px;margin-top:6px;">إجمالي التأخير: ${fmtMins(L)}</div>`:'') + (E?`<div style="color:var(--danger);font-size:13px;margin-top:3px;">إجمالي الخروج المبكر: ${fmtMins(E)}</div>`:''); })()}
       </div>
