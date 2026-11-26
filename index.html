@@ -1462,6 +1462,21 @@ async function shareOrDownloadPdf(canvas, filenameBase){
   setTimeout(()=>URL.revokeObjectURL(url), 5000);
   alert('تم حفظ ملف PDF في جهازك. افتحه وشاركه على واتساب.');
 }
+// كشف مختصر: أيام الحضور والغياب وتواريخ الغياب لكل موظف
+async function exportSummaryReport(){
+  const block = document.getElementById('summary-block');
+  if(!block){ alert('لا يوجد موظفون.'); return; }
+  if(typeof html2canvas === 'undefined'){ alert('تعذّر تحميل أداة التصوير.'); return; }
+  const area = document.createElement('div');
+  area.innerHTML = `<div style="text-align:center;">
+      <img src="${LOGO_URL}" alt="" onerror="this.style.display='none'" style="width:60px;height:60px;border-radius:50%;object-fit:cover;">
+      <h2 style="font-size:16px;margin:6px 0 12px;">كشف حضور تنوركو</h2>
+    </div>`;
+  area.appendChild(block.cloneNode(true));
+  const canvas = await captureArea(area);
+  if(!canvas){ alert('تعذّر إنشاء صورة الكشف.'); return; }
+  await shareOrDownloadPdf(canvas, 'كشف-الحضور-والغياب-تنوركو-' + state.currentMonth);
+}
 async function exportMonthReport(){
   await exportArea('report-capture-area', 'كشف-حضور-تنوركو-' + state.currentMonth);
 }
@@ -1740,6 +1755,7 @@ function App(){
             </tr>
           `).join('');
       const summaryHtml = state.employees.length === 0 ? '' : `
+        <div id="summary-block">
         <b style="font-size:14px;display:block;margin-bottom:6px;">ملخص الحضور والغياب — ${monthLabel(state.currentMonth)}</b>
         <div class="table-wrap">
           <table>
@@ -1755,6 +1771,7 @@ function App(){
                 <td>${t.hours.toFixed(1)}</td>
               </tr>`; }).join('')}</tbody>
           </table>
+        </div>
         </div>`;
       const totalsHtml = Object.keys(totalsByEmployee).length === 0 ? '' : `
         <div class="card">
@@ -1794,6 +1811,7 @@ function App(){
           ${totalsHtml}
         </div>
         <div class="actions-bar no-print">
+          <button class="btn-primary" id="export-summary-btn" style="flex-basis:100%;">📲 إرسال كشف الحضور والغياب</button>
           <button class="btn-primary" id="export-report-btn">📲 حفظ PDF وإرسال واتساب</button>
           <button class="btn-ghost" id="print-report-btn">🖨️ طباعة</button>
         </div>
@@ -1801,6 +1819,7 @@ function App(){
       document.getElementById('prev-month-btn').onclick = ()=> shiftMonth(-1);
       document.getElementById('next-month-btn').onclick = ()=> shiftMonth(1);
       document.getElementById('export-report-btn').onclick = exportMonthReport;
+      document.getElementById('export-summary-btn').onclick = exportSummaryReport;
       document.getElementById('print-report-btn').onclick = ()=> window.print();
       document.getElementById('add-manual-rec-btn').onclick = addManualRecord;
       content.querySelectorAll('[data-edit]').forEach(cell=>{
