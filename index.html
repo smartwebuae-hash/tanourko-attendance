@@ -1175,11 +1175,20 @@ async function captureArea(target){
   document.body.appendChild(wrap);
   try{
     if(document.fonts && document.fonts.ready) await document.fonts.ready;
-    return await html2canvas(wrap, {
-      backgroundColor:'#ffffff', scale:2, useCORS:true,
+    const SCALE = 2;
+    // أماكن آمنة لقطع الصفحة: بين الصفوف والبطاقات فقط (حتى لا ينقص اسم بين صفحتين)
+    const top0 = wrap.getBoundingClientRect().top, breaks = new Set();
+    wrap.querySelectorAll('tr, .item-row, .card, .table-wrap, h2, b').forEach(el=>{
+      const r = el.getBoundingClientRect();
+      breaks.add(Math.round((r.top - top0) * SCALE)); breaks.add(Math.round((r.bottom - top0) * SCALE));
+    });
+    const canvas = await html2canvas(wrap, {
+      backgroundColor:'#ffffff', scale:SCALE, useCORS:true,
       scrollX:0, scrollY:0, windowWidth: 960, windowHeight: wrap.scrollHeight,
       width: wrap.scrollWidth, height: wrap.scrollHeight
     });
+    canvas._breaks = Array.from(breaks).filter(y=> y > 0).sort((a,b)=> a - b);
+    return canvas;
   }catch(e){ return null; }
   finally{ wrap.remove(); }
 }
@@ -1412,7 +1421,13 @@ function canvasToPdfBlob(canvas){
     const pageHeightPx = Math.floor(pageHeightMM / pxToMM);
     let renderedHeight = 0; let first = true;
     while(renderedHeight < imgHeight){
-      const sliceHeight = Math.min(pageHeightPx, imgHeight - renderedHeight);
+      let sliceHeight = Math.min(pageHeightPx, imgHeight - renderedHeight);
+      if(renderedHeight + sliceHeight < imgHeight && Array.isArray(canvas._breaks)){
+        // نقطع عند آخر فاصل بين صفين داخل الصفحة، فالصف اللي ما يكفي ينتقل كاملًا للصفحة التالية
+        const minY = renderedHeight + pageHeightPx * 0.4, maxY = renderedHeight + pageHeightPx;
+        const ok = canvas._breaks.filter(y=> y >= minY && y <= maxY);
+        if(ok.length) sliceHeight = ok[ok.length - 1] - renderedHeight;
+      }
       const pageCanvas = document.createElement('canvas');
       pageCanvas.width = imgWidth; pageCanvas.height = sliceHeight;
       const ctx = pageCanvas.getContext('2d');
