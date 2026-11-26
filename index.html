@@ -71,7 +71,12 @@
   .logout{color:var(--muted);font-size:13px;background:none;border:none;text-decoration:underline;cursor:pointer;padding:6px;}
   .actions-bar{display:flex;gap:8px;flex-wrap:wrap;}
   .actions-bar button{flex:1;min-width:120px;padding:11px;font-size:13px;}
-  @media print{ .no-print{display:none !important;} body{background:#fff;color:#000;} .card,.table-wrap{border-color:#000;} thead th{background:#e8711a;color:#fff;-webkit-print-color-adjust:exact;print-color-adjust:exact;} }
+  td.emp-name{white-space:nowrap;font-weight:700;padding-inline:8px;}
+  .capture-mode{width:100% !important;max-width:none !important;}
+  .capture-mode .table-wrap{overflow:visible !important;}
+  .capture-mode table{font-size:13px;}
+  @media print{ .table-wrap{overflow:visible !important;} table{font-size:11px;} td.emp-name{white-space:nowrap;} tr{page-break-inside:avoid;}
+    .no-print{display:none !important;} body{background:#fff;color:#000;} .card,.table-wrap{border-color:#000;} thead th{background:#e8711a;color:#fff;-webkit-print-color-adjust:exact;print-color-adjust:exact;} }
 </style>
 </head>
 <body>
@@ -279,14 +284,16 @@ function monthStats(emp, mKey){
   const start = empStartDate(emp), today = todayISO();
   const have = new Set(state.records.filter(r=>r.employee===emp.name && monthKey(r.date)===mKey).map(r=>r.date));
   let absent = 0, off = 0, workedOff = 0;
+  const absentDates = [];
+  const noOut = state.records.filter(r=>r.employee===emp.name && monthKey(r.date)===mKey && r.timeIn && !r.timeOut && r.date < today).length;
   for(let d=1; d<=days; d++){
     const iso = `${y}-${pad(m)}-${pad(d)}`;
     if(iso > today) break;
     if(!start || iso < start) continue;
     if(isOffDay(emp, iso)){ off++; if(have.has(iso)) workedOff++; continue; }
-    if(!have.has(iso)) absent++;
+    if(!have.has(iso)){ absent++; absentDates.push(d + '/' + m); }
   }
-  return { absent, off, workedOff };
+  return { absent, off, workedOff, absentDates, noOut };
 }
 // ===== حساب التأخير والخروج المبكر =====
 function toMins(t){ if(!t || !/^\d{1,2}:\d{2}$/.test(t)) return null; const [h,m]=t.split(':').map(Number); return h*60+m; }
@@ -1155,20 +1162,32 @@ function shiftDay(delta){
   state.currentDay = `${dt.getFullYear()}-${pad(dt.getMonth()+1)}-${pad(dt.getDate())}`;
   render();
 }
+// تصوير الكشف بعرض ثابت حتى تظهر الأسماء كاملة بدون قص (نسخة مؤقتة بدون أزرار التحكم)
+async function captureArea(target){
+  const wrap = document.createElement('div');
+  wrap.setAttribute('dir', 'rtl');
+  wrap.style.cssText = 'position:absolute;left:0;top:0;width:900px;padding:14px;background:#ffffff;z-index:-1;';
+  const copy = target.cloneNode(true);
+  copy.removeAttribute('id');
+  copy.classList.add('capture-mode');
+  copy.querySelectorAll('.no-print').forEach(el=> el.remove());
+  wrap.appendChild(copy);
+  document.body.appendChild(wrap);
+  try{
+    if(document.fonts && document.fonts.ready) await document.fonts.ready;
+    return await html2canvas(wrap, {
+      backgroundColor:'#ffffff', scale:2, useCORS:true,
+      scrollX:0, scrollY:0, windowWidth: 960, windowHeight: wrap.scrollHeight,
+      width: wrap.scrollWidth, height: wrap.scrollHeight
+    });
+  }catch(e){ return null; }
+  finally{ wrap.remove(); }
+}
 async function exportArea(areaId, filenameBase){
   const target = document.getElementById(areaId);
   if(!target || typeof html2canvas === 'undefined'){ alert('تعذّر تحميل أداة التصوير.'); return; }
-  let canvas;
-  const hid = Array.from(target.querySelectorAll('.no-print'));
-  hid.forEach(el=>{ el.dataset.pd = el.style.display || ''; el.style.display = 'none'; });
-  try{
-    canvas = await html2canvas(target, {
-      backgroundColor:'#ffffff', scale:2, useCORS:true,
-      windowWidth: target.scrollWidth, windowHeight: target.scrollHeight,
-      width: target.scrollWidth, height: target.scrollHeight
-    });
-  }catch(e){ hid.forEach(el=>{ el.style.display = el.dataset.pd || ''; }); alert('تعذّر إنشاء صورة الكشف.'); return; }
-  hid.forEach(el=>{ el.style.display = el.dataset.pd || ''; });
+  const canvas = await captureArea(target);
+  if(!canvas){ alert('تعذّر إنشاء صورة الكشف.'); return; }
   await shareOrDownloadPdf(canvas, filenameBase);
 }
 function dailyRows(iso){
@@ -1423,17 +1442,7 @@ async function shareOrDownloadPdf(canvas, filenameBase){
   alert('تم حفظ ملف PDF في جهازك. افتحه وشاركه على واتساب.');
 }
 async function exportMonthReport(){
-  const target = document.getElementById('report-capture-area');
-  if(!target || typeof html2canvas === 'undefined'){ alert('تعذّر تحميل أداة التصوير.'); return; }
-  let canvas;
-  try{
-    canvas = await html2canvas(target, {
-      backgroundColor:'#ffffff', scale:2, useCORS:true,
-      windowWidth: target.scrollWidth, windowHeight: target.scrollHeight,
-      width: target.scrollWidth, height: target.scrollHeight
-    });
-  }catch(e){ alert('تعذّر إنشاء صورة الكشف.'); return; }
-  await shareOrDownloadPdf(canvas, 'كشف-حضور-تنوركو-' + state.currentMonth);
+  await exportArea('report-capture-area', 'كشف-حضور-تنوركو-' + state.currentMonth);
 }
 
 function messageBox(){
@@ -1634,7 +1643,7 @@ function App(){
         else if(x.status==='na') note = '-';
         else note = (x.status==='workedOff' ? '<span class="tag tag-in">عمل في إجازته</span>' : '') + notesHtml(r);
         return `<tr>
-          <td style="font-weight:700;">${x.name}</td>
+          <td class="emp-name">${x.name}</td>
           <td ${r?`style="cursor:pointer;text-decoration:underline;" data-edit="${r.id}|timeIn"`:''}>${r ? (r.timeIn||'-') : '-'}</td>
           <td ${r?`style="cursor:pointer;text-decoration:underline;" data-edit="${r.id}|timeOut"`:''}>${r ? (r.timeOut||'لم يخرج') : '-'}</td>
           <td>${r ? (hoursBetween(r.timeIn,r.timeOut)||'-') : '-'}</td>
@@ -1701,7 +1710,7 @@ function App(){
         : monthRecs.map(r=>`
             <tr>
               <td>${isoToDisplay(r.date)}</td>
-              <td>${r.employee}</td>
+              <td class="emp-name">${r.employee}</td>
               <td style="cursor:pointer;text-decoration:underline;" data-edit="${r.id}|timeIn">${r.timeIn||'-'}</td>
               <td style="cursor:pointer;text-decoration:underline;" data-edit="${r.id}|timeOut">${r.timeOut||'-'}</td>
               <td>${fmtH(netHours(r))}</td>
@@ -1709,6 +1718,23 @@ function App(){
               <td class="no-print"><button data-del-rec="${r.id}" style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:11px;white-space:nowrap;">🗑️ إزالة البصمة</button></td>
             </tr>
           `).join('');
+      const summaryHtml = state.employees.length === 0 ? '' : `
+        <b style="font-size:14px;display:block;margin-bottom:6px;">ملخص الحضور والغياب — ${monthLabel(state.currentMonth)}</b>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>الموظف</th><th>أيام الحضور</th><th>أيام الغياب</th><th>تواريخ الغياب</th><th>لم يبصم خروج</th><th>إجازة</th><th>ساعات العمل</th></tr></thead>
+            <tbody>${state.employees.map(emp=>{ const t = totalsByEmployee[emp.name] || { days:0, hours:0 }; const ms = monthStats(emp, state.currentMonth);
+              return `<tr>
+                <td class="emp-name">${escHtml(emp.name)}</td>
+                <td>${t.days}</td>
+                <td style="font-weight:800;${ms.absent>0?'color:var(--danger);':''}">${ms.absent}</td>
+                <td style="font-size:11px;">${ms.absentDates.length ? ms.absentDates.join('، ') : '-'}</td>
+                <td style="font-weight:800;${ms.noOut>0?'color:var(--danger);':''}">${ms.noOut}</td>
+                <td>${ms.off}</td>
+                <td>${t.hours.toFixed(1)}</td>
+              </tr>`; }).join('')}</tbody>
+          </table>
+        </div>`;
       const totalsHtml = Object.keys(totalsByEmployee).length === 0 ? '' : `
         <div class="card">
           <b style="font-size:14px;">إجمالي الشهر لكل موظف</b>
@@ -1736,6 +1762,8 @@ function App(){
             <img src="${LOGO_URL}" alt="" onerror="this.style.display='none'" style="width:60px;height:60px;border-radius:50%;object-fit:cover;">
             <h2 style="font-size:16px;margin:6px 0 12px;">كشف حضور تنوركو — ${monthLabel(state.currentMonth)}</h2>
           </div>
+          ${summaryHtml}
+          <b style="font-size:14px;display:block;margin-bottom:6px;">تفاصيل التبصيم</b>
           <div class="table-wrap">
             <table>
               <thead><tr><th>التاريخ</th><th>الموظف</th><th>الدخول</th><th>الخروج</th><th>ساعات العمل</th><th>ملاحظات</th><th class="no-print"></th></tr></thead>
