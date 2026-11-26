@@ -270,6 +270,12 @@ function netHours(rec){
 function fmtH(h){ return (h === null || h === undefined) ? '-' : h.toFixed(1); }
 function weekdayOf(iso){ const [y,m,d] = iso.split('-').map(Number); return new Date(y, m-1, d).getDay(); }
 function dayNameOf(iso){ return DAY_NAMES_AR[weekdayOf(iso)]; }
+// اليوم الحالي لا يُحسب غياب قبل بداية دوام الموظف (اليوم يبدأ مع الدوام وليس من منتصف الليل)
+function notStartedYet(emp, iso){
+  if(iso !== todayISO()) return false;
+  const st = toMins(emp && emp.shiftStart);
+  return st === null || toMins(nowTimeStr()) < st;
+}
 function isOffDay(emp, iso){ return !!emp && emp.dayOff !== '' && String(weekdayOf(iso)) === String(emp.dayOff); }
 function offLabel(emp){ return emp.dayOff !== '' ? DAY_NAMES_AR[+emp.dayOff] : 'بدون'; }
 function empStartDate(emp){
@@ -291,7 +297,7 @@ function monthStats(emp, mKey){
     if(iso > today) break;
     if(!start || iso < start) continue;
     if(isOffDay(emp, iso)){ off++; if(have.has(iso)) workedOff++; continue; }
-    if(!have.has(iso)){ absent++; absentDates.push(d + '/' + m); }
+    if(!have.has(iso)){ if(notStartedYet(emp, iso)) continue; absent++; absentDates.push(d + '/' + m); }
   }
   return { absent, off, workedOff, absentDates, noOut };
 }
@@ -1208,7 +1214,7 @@ function dailyRows(iso){
     let status;
     if(r) status = isOffDay(emp, iso) ? 'workedOff' : 'present';
     else if(isOffDay(emp, iso)) status = 'off';
-    else if(iso > todayISO() || !start || iso < start) status = 'na';
+    else if(iso > todayISO() || !start || iso < start || notStartedYet(emp, iso)) status = 'na';
     else status = 'absent';
     rows.push({ name: emp.name, rec: r || null, status });
   });
