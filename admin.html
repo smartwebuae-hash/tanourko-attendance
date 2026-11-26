@@ -909,8 +909,8 @@ async function editRecordTime(recId, field){
   render();
 }
 async function deleteRecord(recId){
-  if(!confirm('حذف هذا السجل نهائيًا؟')) return;
   const _r = state.records.find(r=>r.id===recId);
+  if(!confirm(_r ? `إزالة بصمة ${_r.employee} يوم ${isoToDisplay(_r.date)}؟\nسيظهر «غائب» في هذا اليوم (إلا إذا كان يوم إجازته).` : 'حذف هذا السجل نهائيًا؟')) return;
   if(_r && _r.remote && _r.auto){
     const _e = findEmployee(_r.employee);
     if(_e){ _e.remoteSkip = (_e.remoteSkip||[]).concat(_r.date); await saveEmployees(); }
@@ -1642,7 +1642,8 @@ function App(){
           <td style="font-size:11px;">${note}</td>
           <td class="no-print">${(()=>{ const e = findEmployee(x.name);
             const can = e && !isRemoteEmp(e) && iso <= todayISO() && !(r && r.timeIn && r.timeOut);
-            return can ? `<button class="btn-ghost" data-punch="${escHtml(x.name)}" style="padding:6px 8px;font-size:11px;white-space:nowrap;">🛡️ ${r ? 'خروج' : 'تبصيم'}</button>` : ''; })()}</td>
+            return (can ? `<button class="btn-ghost" data-punch="${escHtml(x.name)}" style="padding:6px 8px;font-size:11px;white-space:nowrap;">🛡️ ${r ? 'خروج' : 'تبصيم'}</button>` : '')
+              + (r ? `<button class="btn-ghost" data-del-rec="${r.id}" style="padding:6px 8px;font-size:11px;white-space:nowrap;color:var(--danger);margin-top:4px;">🗑️ إزالة البصمة (غائب)</button>` : ''); })()}</td>
         </tr>`;
       }).join('') || `<tr><td colspan="7" style="padding:16px;color:var(--muted);">لا يوجد موظفون</td></tr>`;
       content.innerHTML = `
@@ -1686,6 +1687,7 @@ function App(){
       document.getElementById('export-daily-btn').onclick = ()=> exportArea('daily-capture-area', 'كشف-يومي-تنوركو-' + iso);
       document.getElementById('print-daily-btn').onclick = ()=> window.print();
       content.querySelectorAll('[data-punch]').forEach(b=>{ b.onclick = ()=> startAdminPunch(b.dataset.punch); });
+      content.querySelectorAll('[data-del-rec]').forEach(b=>{ b.onclick = ()=> deleteRecord(b.dataset.delRec); });
       const _aps = document.getElementById('ap-save'); if(_aps) _aps.onclick = saveAdminPunch;
       const _apc = document.getElementById('ap-cancel'); if(_apc) _apc.onclick = ()=>{ state.adminPunch = null; render(); };
       const _apm = document.getElementById('ap-mode');
@@ -1704,7 +1706,7 @@ function App(){
               <td style="cursor:pointer;text-decoration:underline;" data-edit="${r.id}|timeOut">${r.timeOut||'-'}</td>
               <td>${fmtH(netHours(r))}</td>
               <td style="font-size:11px;">${notesHtml(r)}</td>
-              <td class="no-print"><button data-del-rec="${r.id}" style="background:none;border:none;color:var(--danger);cursor:pointer;">🗑️</button></td>
+              <td class="no-print"><button data-del-rec="${r.id}" style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:11px;white-space:nowrap;">🗑️ إزالة البصمة</button></td>
             </tr>
           `).join('');
       const totalsHtml = Object.keys(totalsByEmployee).length === 0 ? '' : `
